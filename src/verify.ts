@@ -1,7 +1,17 @@
-import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { sanitizeLog } from './log.js';
-import { runCommand } from './git.js';
+import { runGitCommand } from './git.js';
 import type { VerificationRecord } from './state.js';
+import {
+  minimalWindowsEnvironment,
+  resolveWindowsSystemExecutable,
+  spawnManagedProcess,
+  terminateProcessTree,
+} from './trusted-process.js';
+import { AppError } from './errors.js';
 
 const MAX_CAPTURE = 64 * 1024;
 
@@ -11,46 +21,130 @@ interface VerificationCheck {
   output: string;
 }
 
-function runShell(command: string, cwd: string, timeoutMs: number): Promise<VerificationCheck> {
-  return new Promise((resolve) => {
+async function runShell(command: string, cwd: string, timeoutMs: number, signal?: AbortSignal): Promise<VerificationCheck> {
+  let shell: string;
+  try {
+    shell = process.platform === 'win32'
+      ? await resolveWindowsSystemExecutable(path.join('System32', 'cmd.exe'))
+      : '/bin/sh';
+  } catch (error) {
+    return { label: command, ok: false, output: sanitizeLog(error instanceof Error ? error.message : String(error), 8000) };
+  }
+  const scriptDirectory = await mkdtemp(path.join(os.tmpdir(), 'codex-infinite-verify-'));
+  const scriptPath = path.join(scriptDirectory, 'verify.cmd');
+  await writeFile(scriptPath, `@echo off\r\n${command}\r\n`, { encoding: 'utf8', mode: 0o600 });
+  return new Promise((resolve, reject) => {
     let output = '';
     let settled = false;
-    const child = spawn(command, {
-      cwd,
-      shell: true,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    let terminating = false;
+    let child: ChildProcess;
+    try {
+      child = spawnManagedProcess(shell, process.platform === 'win32' ? ['/d', '/s', '/c', scriptPath] : ['-c', command], {
+        cwd,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: minimalWindowsEnvironment({
+          PATH: [
+            'C:\\Windows\\System32',
+            'C:\\Windows',
+            'C:\\Program Files\\nodejs',
+            'C:\\Program Files\\Git\\cmd',
+            'C:\\Program Files\\Git\\bin',
+            'C:\\Program Files\\dotnet',
+          ].join(path.delimiter),
+          PATHEXT: '.COM;.EXE;.BAT;.CMD',
+          COMSPEC: 'C:\\Windows\\System32\\cmd.exe',
+          GIT_CONFIG_NOSYSTEM: '1',
+          GIT_CONFIG_GLOBAL: 'NUL',
+          GIT_TERMINAL_PROMPT: '0',
+          NPM_CONFIG_USERCONFIG: 'NUL',
+        }),
+      });
+    } catch (error) {
+      void rm(scriptDirectory, { recursive: true, force: true }).finally(() => {
+        resolve({ label: command, ok: false, output: sanitizeLog(error instanceof Error ? error.message : String(error), 8000) });
+      });
+      return;
+    }
     const append = (chunk: Buffer) => { output = (output + chunk.toString('utf8')).slice(0, MAX_CAPTURE); };
-    child.stdout.on('data', append);
-    child.stderr.on('data', append);
-    const timer = setTimeout(() => {
-      child.kill();
-      finish(false, `${output}\n[timeout]`);
-    }, timeoutMs);
+    child.stdout?.on('data', append);
+    child.stderr?.on('data', append);
+    const stop = (suffix: string) => {
+      if (settled || terminating) return;
+      terminating = true;
+      void terminateProcessTree(child).then(
+        () => finish(false, `${output}\n[${suffix}]`),
+        (error) => failTermination(error),
+      );
+    };
+    const timer = setTimeout(() => stop('timeout'), timeoutMs);
+    const onAbort = () => stop('aborted');
+    signal?.addEventListener('abort', onAbort, { once: true });
     child.once('error', (error) => finish(false, `${output}\n${error.message}`));
-    child.once('exit', (code) => finish(code === 0, output));
+    child.once('exit', (code) => { if (!terminating) finish(code === 0, output); });
+    if (signal?.aborted) onAbort();
 
     function finish(ok: boolean, raw: string): void {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ label: command, ok, output: sanitizeLog(raw.trim(), 8000) });
+      signal?.removeEventListener('abort', onAbort);
+      void rm(scriptDirectory, { recursive: true, force: true }).finally(() => {
+        resolve({ label: command, ok, output: sanitizeLog(raw.trim(), 8000) });
+      });
+    }
+
+    function failTermination(error: unknown): void {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      void rm(scriptDirectory, { recursive: true, force: true }).finally(() => {
+        reject(new AppError(
+          'HOST_PROCESS_UNCERTAIN',
+          `No se pudo confirmar la terminacion de --verify: ${error instanceof Error ? error.message : String(error)}`,
+          1,
+          { cause: error },
+        ));
+      });
     }
   });
 }
 
-export async function verifyWorkspace(workspace: string, commands: string[], timeoutMs = 15 * 60_000): Promise<VerificationRecord> {
+export async function verifyWorkspace(
+  workspace: string,
+  commands: string[],
+  timeoutMs = 15 * 60_000,
+  signal?: AbortSignal,
+): Promise<VerificationRecord> {
   const checks: VerificationCheck[] = [];
-  for (const args of [['diff', '--check'], ['diff', '--cached', '--check']]) {
-    const result = await runCommand('git', args, workspace, 60_000);
-    checks.push({
-      label: `git ${args.join(' ')}`,
-      ok: result.exitCode === 0 && !result.timedOut,
-      output: sanitizeLog((result.stderr || result.stdout).trim(), 8000),
-    });
+  const deadline = Date.now() + timeoutMs;
+  const runGitChecks = async (suffix = ''): Promise<void> => {
+    for (const args of [['diff', '--check'], ['diff', '--cached', '--check']]) {
+      const label = `git ${args.join(' ')}${suffix}`;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0 || signal?.aborted) {
+        checks.push({ label, ok: false, output: signal?.aborted ? 'aborted' : 'timeout' });
+        continue;
+      }
+      const result = await runGitCommand(args, workspace, Math.min(60_000, remaining), signal);
+      checks.push({
+        label,
+        ok: result.exitCode === 0 && !result.timedOut,
+        output: sanitizeLog((result.stderr || result.stdout).trim(), 8000),
+      });
+    }
+  };
+  await runGitChecks();
+  for (const command of commands) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0 || signal?.aborted) {
+      checks.push({ label: command, ok: false, output: signal?.aborted ? 'aborted' : 'timeout' });
+      break;
+    }
+    checks.push(await runShell(command, workspace, remaining, signal));
   }
-  for (const command of commands) checks.push(await runShell(command, workspace, timeoutMs));
+  await runGitChecks(' (final)');
   return {
     ok: checks.every((check) => check.ok),
     checkedAt: new Date().toISOString(),

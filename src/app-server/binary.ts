@@ -1,16 +1,20 @@
-import { spawn } from 'node:child_process';
 import { access, readdir, stat } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { constants } from 'node:fs';
-import { AppError } from '../errors.js';
+import { AppError, errorMessage } from '../errors.js';
+import {
+  minimalWindowsEnvironment,
+  resolveWindowsSystemExecutable,
+  spawnManagedProcess,
+  terminateProcessTree,
+} from '../trusted-process.js';
 
 const PROBE_OUTPUT_LIMIT = 128 * 1024;
 
 export interface BinaryInfo {
   path: string;
   version: string;
-  source: 'explicit' | 'environment' | 'desktop-cache' | 'plugin-runtime' | 'application' | 'path';
+  source: 'explicit' | 'environment' | 'desktop-cache';
   signedByOpenAI: boolean | null;
 }
 
@@ -31,36 +35,55 @@ async function isExecutableFile(candidate: string): Promise<boolean> {
 }
 
 export function runProbe(binary: string, args: string[], timeoutMs = 5000): Promise<ProbeResult> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let stdout = '';
     let stderr = '';
     let settled = false;
     let child;
     try {
-      child = spawn(binary, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      child = spawnManagedProcess(binary, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch {
       resolve({ exitCode: null, stdout, stderr, timedOut: false });
       return;
     }
+    const stdoutStream = child.stdout;
+    const stderrStream = child.stderr;
+    if (!stdoutStream || !stderrStream) {
+      resolve({ exitCode: null, stdout, stderr, timedOut: false });
+      return;
+    }
+    let timeoutTriggered = false;
     const timer = setTimeout(() => {
-      child.kill();
-      finish(null, true);
+      timeoutTriggered = true;
+      void terminateProcessTree(child).catch((error) => failTermination(error));
     }, timeoutMs);
 
     const append = (current: string, chunk: Buffer) => {
       if (current.length >= PROBE_OUTPUT_LIMIT) return current;
       return (current + chunk.toString('utf8')).slice(0, PROBE_OUTPUT_LIMIT);
     };
-    child.stdout.on('data', (chunk: Buffer) => { stdout = append(stdout, chunk); });
-    child.stderr.on('data', (chunk: Buffer) => { stderr = append(stderr, chunk); });
+    stdoutStream.on('data', (chunk: Buffer) => { stdout = append(stdout, chunk); });
+    stderrStream.on('data', (chunk: Buffer) => { stderr = append(stderr, chunk); });
     child.once('error', () => finish(null, false));
-    child.once('exit', (code) => finish(code, false));
+    child.once('exit', (code) => finish(code, timeoutTriggered));
 
     function finish(exitCode: number | null, timedOut: boolean) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       resolve({ exitCode, stdout, stderr, timedOut });
+    }
+
+    function failTermination(error: unknown): void {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new AppError(
+        'HOST_PROCESS_UNCERTAIN',
+        `No se pudo confirmar el cierre del probe de Codex Desktop: ${errorMessage(error)}`,
+        1,
+        { cause: error },
+      ));
     }
   });
 }
@@ -72,31 +95,49 @@ async function verifyWindowsSignature(candidate: string): Promise<boolean> {
     '$subject = if ($s.SignerCertificate) { $s.SignerCertificate.Subject } else { "" }',
     '[pscustomobject]@{ Status = [string]$s.Status; Subject = $subject } | ConvertTo-Json -Compress',
   ].join('; ');
-  const result = await new Promise<ProbeResult>((resolve) => {
+  const result = await new Promise<ProbeResult>((resolve, reject) => {
     let stdout = '';
     let stderr = '';
-    let child;
     try {
-      const windowsRoot = process.env.WINDIR ?? 'C:\\Windows';
-      const programFiles = process.env.ProgramFiles ?? 'C:\\Program Files';
+      const windowsRoot = 'C:\\Windows';
+      const programFiles = 'C:\\Program Files';
       const powerShellModulePath = [
         path.join(programFiles, 'WindowsPowerShell', 'Modules'),
         path.join(windowsRoot, 'system32', 'WindowsPowerShell', 'v1.0', 'Modules'),
       ].join(path.delimiter);
-      child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, PSModulePath: powerShellModulePath, CODEX_INFINITE_VERIFY_BIN: candidate },
-      });
+      void resolveWindowsSystemExecutable(path.join('System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'))
+        .then((powershell) => {
+          const child = spawnManagedProcess(powershell, ['-NoProfile', '-NonInteractive', '-Command', script], {
+            windowsHide: true,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: minimalWindowsEnvironment({ PSModulePath: powerShellModulePath, CODEX_INFINITE_VERIFY_BIN: candidate }),
+          });
+          const stdoutStream = child.stdout;
+          const stderrStream = child.stderr;
+          if (!stdoutStream || !stderrStream) {
+            resolve({ exitCode: null, stdout, stderr, timedOut: false });
+            return;
+          }
+          let timeoutTriggered = false;
+          const timer = setTimeout(() => {
+            timeoutTriggered = true;
+            void terminateProcessTree(child).catch((error) => reject(new AppError(
+              'HOST_PROCESS_UNCERTAIN',
+              `No se pudo confirmar el cierre de la validacion Authenticode: ${errorMessage(error)}`,
+              1,
+              { cause: error },
+            )));
+          }, 5000);
+          stdoutStream.on('data', (chunk: Buffer) => { stdout = (stdout + chunk.toString('utf8')).slice(0, 8192); });
+          stderrStream.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString('utf8')).slice(0, 8192); });
+          child.once('error', () => { clearTimeout(timer); resolve({ exitCode: null, stdout, stderr, timedOut: false }); });
+          child.once('exit', (exitCode) => { clearTimeout(timer); resolve({ exitCode, stdout, stderr, timedOut: timeoutTriggered }); });
+        })
+        .catch(() => resolve({ exitCode: null, stdout, stderr, timedOut: false }));
     } catch {
       resolve({ exitCode: null, stdout, stderr, timedOut: false });
       return;
     }
-    const timer = setTimeout(() => child.kill(), 5000);
-    child.stdout.on('data', (chunk: Buffer) => { stdout = (stdout + chunk.toString('utf8')).slice(0, 8192); });
-    child.stderr.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString('utf8')).slice(0, 8192); });
-    child.once('error', () => { clearTimeout(timer); resolve({ exitCode: null, stdout, stderr, timedOut: false }); });
-    child.once('exit', (exitCode) => { clearTimeout(timer); resolve({ exitCode, stdout, stderr, timedOut: false }); });
   });
   if (result.exitCode !== 0) return false;
   try {
@@ -131,61 +172,51 @@ async function desktopCacheCandidates(): Promise<string[]> {
   return ranked.sort((a, b) => b.modified - a.modified).map(({ candidate }) => candidate);
 }
 
-async function pathCandidates(): Promise<string[]> {
-  const command = process.platform === 'win32' ? 'where.exe' : 'which';
-  const args = process.platform === 'win32' ? ['codex.exe'] : ['-a', 'codex'];
-  const result = await runProbe(command, args, 3000);
-  if (result.exitCode !== 0) return [];
-  return result.stdout.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean);
-}
-
-function applicationCandidates(): string[] {
-  if (process.platform === 'darwin') {
-    return [
-      '/Applications/Codex.app/Contents/Resources/codex',
-      '/Applications/ChatGPT.app/Contents/Resources/codex',
-    ];
+function isDesktopBundlePath(candidate: string): boolean {
+  const resolved = path.resolve(candidate);
+  if (process.platform === 'win32') {
+    const localAppData = process.env.LOCALAPPDATA;
+    if (!localAppData) return false;
+    const root = path.resolve(localAppData, 'OpenAI', 'Codex', 'bin');
+    const relative = path.relative(root, resolved);
+    return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)
+      && path.basename(resolved).toLowerCase() === 'codex.exe';
   }
-  return [];
+  return false;
 }
 
 async function validateCandidate(candidate: string, source: BinaryInfo['source'], requireSignature: boolean): Promise<BinaryInfo | null> {
   const resolved = path.resolve(candidate);
+  if (!isDesktopBundlePath(resolved)) return null;
   if (!await isExecutableFile(resolved)) return null;
+  const signedByOpenAI = process.platform === 'win32' ? await verifyWindowsSignature(resolved) : null;
+  if (requireSignature && signedByOpenAI !== true) return null;
+
   const versionProbe = await runProbe(resolved, ['--version']);
   const version = `${versionProbe.stdout}\n${versionProbe.stderr}`.trim().split(/\r?\n/)[0] ?? '';
   if (versionProbe.exitCode !== 0 || !/^codex-cli\s+/i.test(version)) return null;
   const appServerProbe = await runProbe(resolved, ['app-server', '--help']);
   if (appServerProbe.exitCode !== 0 || !/app-server|app server/i.test(`${appServerProbe.stdout}\n${appServerProbe.stderr}`)) return null;
 
-  const signedByOpenAI = process.platform === 'win32' ? await verifyWindowsSignature(resolved) : null;
-  if (requireSignature && signedByOpenAI !== true) return null;
   return { path: resolved, version, source, signedByOpenAI };
 }
 
 export async function discoverCodexBinary(explicit?: string): Promise<BinaryInfo> {
+  if (process.platform !== 'win32' || process.arch !== 'x64') {
+    throw new AppError('UNSUPPORTED_PLATFORM', 'Codex Infinite Agent requiere Codex Desktop en Windows x64.');
+  }
   const configured = explicit || process.env.CODEX_APP_SERVER_BIN;
   if (configured) {
     const source = explicit ? 'explicit' : 'environment';
     const info = await validateCandidate(configured, source, process.platform === 'win32');
     if (!info) {
-      throw new AppError('INVALID_CODEX_BINARY', `El binario configurado no es una CLI oficial compatible con App Server: ${path.resolve(configured)}`);
+      throw new AppError('INVALID_CODEX_BINARY', `El binario configurado no pertenece a un App Server compatible y verificable: ${path.resolve(configured)}`);
     }
     return info;
   }
 
-  const home = os.homedir();
   const groups: Array<{ source: BinaryInfo['source']; candidates: string[] }> = [
     { source: 'desktop-cache', candidates: await desktopCacheCandidates() },
-    {
-      source: 'plugin-runtime',
-      candidates: process.platform === 'win32' ? [
-        path.join(home, '.codex', 'plugins', '.plugin-appserver', 'codex.exe'),
-        path.join(home, '.codex', '.sandbox-bin', 'codex.exe'),
-      ] : [],
-    },
-    { source: 'application', candidates: applicationCandidates() },
-    { source: 'path', candidates: await pathCandidates() },
   ];
 
   const seen = new Set<string>();

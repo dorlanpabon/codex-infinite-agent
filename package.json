@@ -1,19 +1,22 @@
 {
   "name": "codex-desktop-infinite-agent",
-  "version": "1.0.0",
-  "description": "Durable Goal supervisor for Codex Desktop over the official App Server protocol",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Durable native-Goal companion for the Codex Desktop bundled App Server",
   "type": "module",
   "bin": {
     "codex-infinite": "dist/bin/codex-infinite.js"
   },
   "files": [
     "dist",
+    "native/windows-job-wrapper/bin/windows-x64/codex-infinite-job-wrapper.exe",
     "README.md",
     "SECURITY.md",
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "clean": "node scripts/clean.mjs",
+    "build": "npm run clean --silent && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build --silent && node --test test/*.test.mjs",
     "check": "npm run typecheck && npm test && npm pack --dry-run",
@@ -30,6 +33,12 @@
   "engines": {
     "node": ">=22"
   },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
   "devDependencies": {
     "@types/node": "^22.20.1",
     "typescript": "^7.0.2"

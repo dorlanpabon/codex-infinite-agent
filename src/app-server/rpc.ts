@@ -1,8 +1,9 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import readline from 'node:readline';
 import { AppError, RpcError, errorMessage } from '../errors.js';
 import type { Logger } from '../log.js';
+import { minimalWindowsEnvironment, spawnManagedProcess, terminateProcessTree } from '../trusted-process.js';
 
 const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 const MAX_STDERR_BUFFER = 64 * 1024;
@@ -25,6 +26,29 @@ export interface ServerRequest {
   id: number | string;
   method: string;
   params: unknown;
+}
+
+function appServerEnvironment(): NodeJS.ProcessEnv {
+  const allowed = [
+    'PATH', 'PATHEXT', 'SystemRoot', 'WINDIR', 'COMSPEC', 'SystemDrive',
+    'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA',
+    'PROGRAMDATA', 'ProgramFiles', 'ProgramFiles(x86)', 'TEMP', 'TMP', 'TMPDIR',
+    'SHELL', 'USER', 'USERNAME', 'LOGNAME', 'LANG', 'LC_ALL', 'TERM', 'COLORTERM', 'NO_COLOR',
+    'CODEX_HOME', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'ALL_PROXY',
+    'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS',
+    'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'XDG_STATE_HOME',
+  ];
+  const environment: NodeJS.ProcessEnv = {};
+  for (const key of allowed) {
+    const value = process.env[key];
+    if (value !== undefined) environment[key] = value;
+  }
+  return minimalWindowsEnvironment({
+    ...environment,
+    COMSPEC: 'C:\\Windows\\System32\\cmd.exe',
+    ProgramFiles: 'C:\\Program Files',
+    'ProgramFiles(x86)': 'C:\\Program Files (x86)',
+  });
 }
 
 export class JsonRpcProcess extends EventEmitter {
@@ -55,25 +79,40 @@ export class JsonRpcProcess extends EventEmitter {
   }
 
   static async start(binary: string, cwd: string, logger: Logger): Promise<JsonRpcProcess> {
-    const childEnvironment = { ...process.env };
-    delete childEnvironment.OPENAI_API_KEY;
-    delete childEnvironment.CODEX_API_KEY;
-    const child = spawn(binary, ['app-server', '--listen', 'stdio://'], {
-      cwd,
-      windowsHide: true,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: childEnvironment,
-    });
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      const spawned = spawnManagedProcess(binary, ['app-server', '--listen', 'stdio://'], {
+        cwd,
+        windowsHide: true,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: appServerEnvironment(),
+      });
+      if (!spawned.stdin || !spawned.stdout || !spawned.stderr) {
+        throw new AppError('APP_SERVER_SPAWN_FAILED', 'El App Server no expuso stdio administrado.');
+      }
+      child = spawned as ChildProcessWithoutNullStreams;
+    } catch (error) {
+      throw new AppError('APP_SERVER_SPAWN_FAILED', errorMessage(error), 1, { cause: error });
+    }
     const rpc = new JsonRpcProcess(child, logger);
-    await rpc.request('initialize', {
-      clientInfo: {
-        name: 'codex_desktop_infinite_agent',
-        title: 'Codex Desktop Infinite Agent',
-        version: '1.0.0',
-      },
-    }, 30_000);
-    rpc.notify('initialized', {});
-    return rpc;
+    try {
+      await rpc.request('initialize', {
+        clientInfo: {
+          name: 'codex_desktop_infinite_agent',
+          title: 'Codex Desktop Infinite Agent',
+          version: '0.1.0',
+        },
+        capabilities: {
+          experimentalApi: true,
+          requestAttestation: false,
+        },
+      }, 30_000);
+      rpc.notify('initialized', {});
+      return rpc;
+    } catch (error) {
+      await rpc.close();
+      throw error;
+    }
   }
 
   request<T>(method: string, params: unknown = {}, timeoutMs = 30_000): Promise<T> {
@@ -109,14 +148,8 @@ export class JsonRpcProcess extends EventEmitter {
 
   async close(): Promise<void> {
     this.closed = true;
+    await terminateProcessTree(this.process);
     if (this.process.stdin.writable) this.process.stdin.end();
-    if (this.process.exitCode !== null) return;
-    this.process.kill();
-    await Promise.race([
-      new Promise<void>((resolve) => this.process.once('exit', () => resolve())),
-      new Promise<void>((resolve) => setTimeout(resolve, 3000)),
-    ]);
-    if (this.process.exitCode === null) this.process.kill('SIGKILL');
   }
 
   private write(message: RpcMessage): void {

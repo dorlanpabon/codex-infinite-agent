@@ -16,7 +16,7 @@ import {
 } from './state.js';
 import { supervise } from './supervisor.js';
 
-const VERSION = '1.0.0';
+const VERSION = '0.1.0';
 const EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'ultra']);
 
 interface ParsedArgs {
@@ -35,7 +35,7 @@ const HELP = `Codex Desktop Infinite Agent ${VERSION}
 
 Uso:
   codex-infinite run "objetivo" [opciones]
-  codex-infinite resume <run-id> [--bin ruta] [--verbose]
+  codex-infinite resume <run-id> [--dir ruta] [opciones]
   codex-infinite status <run-id>
   codex-infinite runs
   codex-infinite threads [--dir ruta] [--limit n]
@@ -63,7 +63,11 @@ const COMMAND_OPTIONS: Record<string, { flags: Set<string>; values: Set<string>;
     values: new Set(['dir', 'name', 'max-turns', 'max-hours', 'turn-minutes', 'token-budget', 'verify', 'model', 'effort', 'bin']),
     repeatable: new Set(['verify']),
   },
-  resume: { flags: new Set(['verbose']), values: new Set(['bin']) },
+  resume: {
+    flags: new Set(['network', 'danger-full-access', 'verbose']),
+    values: new Set(['dir', 'verify', 'bin']),
+    repeatable: new Set(['verify']),
+  },
   status: { flags: new Set(), values: new Set() },
   runs: { flags: new Set(), values: new Set() },
   threads: { flags: new Set(['verbose']), values: new Set(['dir', 'limit', 'bin']) },
@@ -159,13 +163,23 @@ function terminalExitCode(state: RunState): number {
   if (state.status === 'completed') return 0;
   if (state.status === 'paused') return 130;
   if (state.status === 'budgetLimited') return 3;
+  if (state.status === 'failed') return 1;
   return 2;
+}
+
+function requiresWorkspaceQuarantine(error: unknown): boolean {
+  return error instanceof AppError && new Set([
+    'HOST_PROCESS_UNCERTAIN',
+    'PROCESS_TREE_TERMINATION_UNCERTAIN',
+    'PRIVILEGE_CLEANUP_UNCERTAIN',
+    'REMOTE_STATE_UNCERTAIN',
+  ]).has(error.code);
 }
 
 async function executeRun(args: ParsedArgs): Promise<number> {
   requirePositionals(args, 1, 'codex-infinite run "objetivo" [opciones]');
   const objective = args.positionals[0]!.trim();
-  if (!objective || objective.length > 20_000) throw new AppError('INVALID_OBJECTIVE', 'El objetivo debe tener entre 1 y 20000 caracteres.');
+  if (!objective || objective.length > 4000) throw new AppError('INVALID_OBJECTIVE', 'El objetivo debe tener entre 1 y 4000 caracteres.');
   const baseline = await resolveGitWorkspace(value(args, 'dir') ?? process.cwd());
   const effortValue = value(args, 'effort');
   if (effortValue && !EFFORTS.has(effortValue)) throw new AppError('INVALID_ARGUMENT', 'Nivel --effort invalido.');
@@ -197,14 +211,15 @@ async function executeRun(args: ParsedArgs): Promise<number> {
   const lock = await acquireWorkspaceLock(state.workspace, state.runId);
   const abort = createAbortController();
   let client: CodexDesktopClient | null = null;
+  let finalState: RunState | null = null;
+  let runError: unknown = null;
   try {
     await saveRun(state);
     if (dangerFullAccess) logger.warn('danger-full-access habilitado explicitamente.');
     ({ client } = await openClient(state.workspace, value(args, 'bin'), logger));
-    const finalState = await supervise(client, state, logger, { resume: false, signal: abort.controller.signal });
-    output(finalState);
-    return terminalExitCode(finalState);
+    finalState = await supervise(client, state, logger, { resume: false, signal: abort.controller.signal });
   } catch (error) {
+    runError = error;
     state.status = 'failed';
     state.completedAt = new Date().toISOString();
     state.lastError = sanitizeLog(errorMessage(error), 4000);
@@ -212,9 +227,33 @@ async function executeRun(args: ParsedArgs): Promise<number> {
     throw error;
   } finally {
     abort.cleanup();
-    if (client) await client.close().catch(() => undefined);
+    let closeError: unknown = null;
+    if (client) {
+      try {
+        await client.close();
+      } catch (error) {
+        closeError = error;
+        state.status = 'failed';
+        state.completedAt = new Date().toISOString();
+        state.lastError = sanitizeLog(errorMessage(error), 4000);
+        await saveRun(state).catch(() => undefined);
+      }
+    }
+    const quarantineReason = closeError ?? (requiresWorkspaceQuarantine(runError) ? runError : null);
+    let quarantineError: unknown = null;
+    if (quarantineReason) {
+      try {
+        await lock.quarantine(errorMessage(quarantineReason));
+      } catch (error) {
+        quarantineError = error;
+      }
+    }
     await lock.release().catch((error) => logger.error(`No se pudo liberar el lock: ${errorMessage(error)}`));
+    if (quarantineError) throw new AppError('LOCK_QUARANTINE_FAILED', `No se pudo poner el workspace en cuarentena: ${errorMessage(quarantineError)}`, 1, { cause: quarantineError });
+    if (closeError) throw closeError;
   }
+  output(finalState!);
+  return terminalExitCode(finalState!);
 }
 
 async function executeResume(args: ParsedArgs): Promise<number> {
@@ -224,21 +263,29 @@ async function executeResume(args: ParsedArgs): Promise<number> {
     output(state);
     return 0;
   }
-  const baseline = await resolveGitWorkspace(state.workspace);
+  const baseline = await resolveGitWorkspace(value(args, 'dir') ?? process.cwd());
   const normalize = (candidate: string) => process.platform === 'win32' ? path.resolve(candidate).toLowerCase() : path.resolve(candidate);
   if (!path.isAbsolute(state.workspace) || normalize(baseline.root) !== normalize(state.workspace)) {
-    throw new AppError('WORKSPACE_MISMATCH', 'El workspace guardado ya no coincide con su raiz Git.');
+    throw new AppError('WORKSPACE_MISMATCH', 'Ejecuta resume desde el workspace original o indica --dir con su ruta.');
   }
+  const verifyCommands = args.values.get('verify') ?? [];
+  if (verifyCommands.length > 20 || verifyCommands.some((command) => command.length > 4000)) {
+    throw new AppError('INVALID_ARGUMENT', '--verify admite hasta 20 comandos de 4000 caracteres cada uno.');
+  }
+  state.verifyCommands = verifyCommands;
+  state.dangerFullAccess = args.flags.has('danger-full-access');
+  state.network = args.flags.has('network') || state.dangerFullAccess;
   const logger = createLogger(args.flags.has('verbose'));
   const lock = await acquireWorkspaceLock(state.workspace, state.runId);
   const abort = createAbortController();
   let client: CodexDesktopClient | null = null;
+  let finalState: RunState | null = null;
+  let runError: unknown = null;
   try {
     ({ client } = await openClient(state.workspace, value(args, 'bin'), logger));
-    const finalState = await supervise(client, state, logger, { resume: true, signal: abort.controller.signal });
-    output(finalState);
-    return terminalExitCode(finalState);
+    finalState = await supervise(client, state, logger, { resume: true, signal: abort.controller.signal });
   } catch (error) {
+    runError = error;
     state.status = 'failed';
     state.completedAt = new Date().toISOString();
     state.lastError = sanitizeLog(errorMessage(error), 4000);
@@ -246,9 +293,33 @@ async function executeResume(args: ParsedArgs): Promise<number> {
     throw error;
   } finally {
     abort.cleanup();
-    if (client) await client.close().catch(() => undefined);
+    let closeError: unknown = null;
+    if (client) {
+      try {
+        await client.close();
+      } catch (error) {
+        closeError = error;
+        state.status = 'failed';
+        state.completedAt = new Date().toISOString();
+        state.lastError = sanitizeLog(errorMessage(error), 4000);
+        await saveRun(state).catch(() => undefined);
+      }
+    }
+    const quarantineReason = closeError ?? (requiresWorkspaceQuarantine(runError) ? runError : null);
+    let quarantineError: unknown = null;
+    if (quarantineReason) {
+      try {
+        await lock.quarantine(errorMessage(quarantineReason));
+      } catch (error) {
+        quarantineError = error;
+      }
+    }
     await lock.release().catch((error) => logger.error(`No se pudo liberar el lock: ${errorMessage(error)}`));
+    if (quarantineError) throw new AppError('LOCK_QUARANTINE_FAILED', `No se pudo poner el workspace en cuarentena: ${errorMessage(quarantineError)}`, 1, { cause: quarantineError });
+    if (closeError) throw closeError;
   }
+  output(finalState!);
+  return terminalExitCode(finalState!);
 }
 
 async function executeThreads(args: ParsedArgs): Promise<number> {

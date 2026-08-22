@@ -1,0 +1,37 @@
+{
+  "name": "codex-desktop-infinite-agent",
+  "version": "1.0.0",
+  "description": "Durable Goal supervisor for Codex Desktop over the official App Server protocol",
+  "type": "module",
+  "bin": {
+    "codex-infinite": "dist/bin/codex-infinite.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build --silent && node --test test/*.test.mjs",
+    "check": "npm run typecheck && npm test && npm pack --dry-run",
+    "start": "node dist/bin/codex-infinite.js",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "codex",
+    "desktop",
+    "agent",
+    "app-server"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "^7.0.2"
+  }
+}

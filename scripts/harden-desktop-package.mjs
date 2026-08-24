@@ -32,8 +32,42 @@ if (!executable) throw new Error(`No se encontro el ejecutable empaquetado en ${
 
 const archivePath = path.join(resourcesRoot, 'app.asar');
 const archiveEntries = new Set(listPackage(archivePath).map((entry) => entry.replaceAll('\\', '/')));
+const allowedArchiveRoots = new Set([
+  'dist',
+  'native',
+  'node_modules',
+  'package.json',
+  'README.md',
+  'SECURITY.md',
+  'LICENSE',
+]);
+const allowedRuntimeModules = new Set(['debug', 'electron-squirrel-startup', 'ms']);
+const allowedNativeEntries = new Set([
+  '/native',
+  '/native/windows-job-wrapper',
+  '/native/windows-job-wrapper/bin',
+  '/native/windows-job-wrapper/bin/windows-x64',
+  '/native/windows-job-wrapper/bin/windows-x64/codex-infinite-job-wrapper.exe',
+]);
+for (const entry of archiveEntries) {
+  const segments = entry.split('/').filter(Boolean);
+  const archiveRoot = segments[0];
+  if (!archiveRoot || !allowedArchiveRoots.has(archiveRoot)) {
+    throw new Error(`Entrada inesperada dentro de app.asar: ${entry}.`);
+  }
+  if (archiveRoot === 'node_modules' && segments[1] && !allowedRuntimeModules.has(segments[1])) {
+    throw new Error(`Dependencia no permitida dentro de app.asar: ${entry}.`);
+  }
+  if (archiveRoot === 'native' && (!allowedNativeEntries.has(entry) || process.platform !== 'win32')) {
+    throw new Error(`Binario nativo inesperado dentro de app.asar: ${entry}.`);
+  }
+  if (allowedArchiveRoots.has(archiveRoot) && !['dist', 'native', 'node_modules'].includes(archiveRoot) && segments.length !== 1) {
+    throw new Error(`Ruta inesperada dentro de app.asar: ${entry}.`);
+  }
+}
 for (const required of [
   '/dist/desktop/main.js',
+  '/dist/generated/windows-job-wrapper-integrity.js',
   '/dist/desktop/preload.cjs',
   '/dist/desktop/contracts.js',
   '/dist/desktop/renderer/app.js',

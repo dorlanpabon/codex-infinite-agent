@@ -2,6 +2,7 @@
 name = "codex-infinite-job-wrapper"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 

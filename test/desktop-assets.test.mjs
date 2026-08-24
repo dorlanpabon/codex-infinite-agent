@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { access, readFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import test from 'node:test';
 
 const root = path.resolve(import.meta.dirname, '..');
+const require = createRequire(import.meta.url);
 
 test('desktop renderer modules and preload are included in the local protocol build', async () => {
   const [main, renderer, html] = await Promise.all([
@@ -25,4 +27,22 @@ test('desktop renderer modules and preload are included in the local protocol bu
   assert.doesNotMatch(renderer, /network:\s*run\.network/u);
   assert.doesNotMatch(renderer, /dangerFullAccess:\s*run\.dangerFullAccess/u);
   assert.match(renderer, /network:\s*ui\.resumeNetwork\.checked/u);
+});
+
+test('desktop package uses a strict application allowlist', () => {
+  const { packagerConfig } = require('../forge.config.cjs');
+  const isIgnored = (candidate) => packagerConfig.ignore.some((pattern) => pattern.test(candidate));
+
+  assert.equal(isIgnored('/dist/desktop/main.js'), false);
+  assert.equal(isIgnored('/node_modules/electron-squirrel-startup/index.js'), false);
+  assert.equal(isIgnored('/node_modules/debug/src/index.js'), false);
+  assert.equal(isIgnored('/node_modules/ms/index.js'), false);
+  assert.equal(isIgnored('/NVIDIA Corporation/umdlogs'), true);
+  assert.equal(isIgnored('/.gitignore'), true);
+  assert.equal(isIgnored('/forge.config.cjs'), true);
+  assert.equal(isIgnored('/node_modules/@electron-forge/cli/package.json'), true);
+  assert.equal(
+    isIgnored('/native/windows-job-wrapper/bin/windows-x64/codex-infinite-job-wrapper.exe'),
+    process.platform !== 'win32',
+  );
 });

@@ -4,7 +4,15 @@
   "private": true,
   "productName": "Codex Infinite",
   "description": "Durable native-Goal companion for the Codex Desktop bundled App Server",
-  "author": "Codex Infinite contributors",
+  "author": "dorlanpabon",
+  "homepage": "https://github.com/dorlanpabon/codex-infinite-agent#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dorlanpabon/codex-infinite-agent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dorlanpabon/codex-infinite-agent/issues"
+  },
   "type": "module",
   "main": "dist/desktop/main.js",
   "bin": {
@@ -20,15 +28,17 @@
   ],
   "scripts": {
     "clean": "node scripts/clean.mjs",
-    "build": "npm run clean --silent && tsc -p tsconfig.json && node scripts/copy-desktop-assets.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "native:prepare": "node scripts/build-windows-job-wrapper.mjs",
+    "native:integrity": "node scripts/generate-native-integrity.mjs",
+    "build": "npm run clean --silent && npm run native:integrity --silent && tsc -p tsconfig.json && node scripts/copy-desktop-assets.mjs",
+    "typecheck": "npm run native:integrity --silent && tsc -p tsconfig.json --noEmit",
     "test": "npm run build --silent && node --test test/*.test.mjs",
     "check": "npm run typecheck && npm test && npm pack --dry-run && npm audit",
     "start": "npm run desktop",
     "cli": "node dist/bin/codex-infinite.js",
     "desktop": "npm run build --silent && electron .",
     "desktop:dev": "npm run build && electron-forge start",
-    "desktop:package": "npm run build && node scripts/package-desktop.mjs && node scripts/harden-desktop-package.mjs",
+    "desktop:package": "npm run native:prepare && npm run build && node scripts/package-desktop.mjs && node scripts/harden-desktop-package.mjs",
     "desktop:smoke": "node scripts/smoke-desktop-package.mjs",
     "desktop:make": "npm run desktop:package && electron-forge make --skip-package",
     "prepack": "npm run build"

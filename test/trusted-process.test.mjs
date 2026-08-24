@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { access, chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { access, chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -10,6 +11,20 @@ import {
   spawnManagedProcess,
   terminateProcessTree,
 } from '../dist/trusted-process.js';
+import { WINDOWS_JOB_WRAPPER_SHA256 } from '../dist/generated/windows-job-wrapper-integrity.js';
+
+test('bundled Windows process guard matches the integrity baked into the app', async () => {
+  const binary = path.join(
+    process.cwd(),
+    'native',
+    'windows-job-wrapper',
+    'bin',
+    'windows-x64',
+    'codex-infinite-job-wrapper.exe',
+  );
+  const digest = createHash('sha256').update(await readFile(binary)).digest('hex');
+  assert.equal(digest, WINDOWS_JOB_WRAPPER_SHA256);
+});
 
 test('PATH resolution ignores an executable inside the untrusted workspace', async (t) => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), 'codex-infinite-path-'));

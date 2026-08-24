@@ -6,8 +6,7 @@ import { access, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AppError } from './errors.js';
-
-const WINDOWS_JOB_WRAPPER_SHA256 = 'a6600cf1a3dba2c39ab4ec99cf459d51438bfeb4537d8c1e00fd666801c4b7f1';
+import { WINDOWS_JOB_WRAPPER_SHA256 } from './generated/windows-job-wrapper-integrity.js';
 
 function isInside(candidate: string, root: string): boolean {
   const relative = path.relative(root, candidate);

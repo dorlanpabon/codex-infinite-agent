@@ -61,6 +61,16 @@ jobs:
       - name: Build desktop installers
         run: npm run desktop:make
 
+      - name: Configure Linux Chromium sandbox for unpacked smoke
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mapfile -t sandbox_paths < <(find out -mindepth 2 -maxdepth 2 -type f -name chrome-sandbox -print)
+          test "${#sandbox_paths[@]}" -eq 1
+          sudo chown root:root "${sandbox_paths[0]}"
+          sudo chmod 4755 "${sandbox_paths[0]}"
+          test "$(stat -c '%U:%G %a' "${sandbox_paths[0]}")" = 'root:root 4755'
+
       - name: Desktop runtime smoke
         if: runner.os != 'Linux'
         run: npm run desktop:smoke

@@ -1,22 +1,20 @@
 import path from 'node:path';
-import os from 'node:os';
 import { AppError, errorMessage } from './errors.js';
-import { createLogger, sanitizeLog, type Logger } from './log.js';
-import { discoverCodexBinary, type BinaryInfo } from './app-server/binary.js';
-import { JsonRpcProcess } from './app-server/rpc.js';
-import { CodexDesktopClient } from './app-server/client.js';
-import { resolveGitWorkspace } from './git.js';
+import { createLogger, sanitizeLog } from './log.js';
 import {
-  acquireWorkspaceLock,
-  createRunState,
   listRuns,
   loadRun,
-  saveRun,
   type RunState,
 } from './state.js';
-import { supervise } from './supervisor.js';
+import {
+  doctorDesktop,
+  listDesktopThreads,
+  resumeGoal,
+  startGoal,
+  terminalExitCode,
+} from './operations.js';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 const EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'ultra']);
 
 interface ParsedArgs {
@@ -24,11 +22,6 @@ interface ParsedArgs {
   positionals: string[];
   flags: Set<string>;
   values: Map<string, string[]>;
-}
-
-interface OpenClientResult {
-  binary: BinaryInfo;
-  client: CodexDesktopClient;
 }
 
 const HELP = `Codex Desktop Infinite Agent ${VERSION}
@@ -124,23 +117,6 @@ function requirePositionals(args: ParsedArgs, count: number, usage: string): voi
   if (args.positionals.length !== count) throw new AppError('INVALID_ARGUMENT', `Uso: ${usage}`);
 }
 
-async function openClient(cwd: string, explicitBinary: string | undefined, logger: Logger, requireChatGpt = true): Promise<OpenClientResult> {
-  const binary = await discoverCodexBinary(explicitBinary);
-  logger.info(`App Server ${binary.version} (${binary.source}${binary.signedByOpenAI === true ? ', firma OpenAI valida' : ''}).`);
-  const rpc = await JsonRpcProcess.start(binary.path, cwd, logger);
-  const client = new CodexDesktopClient(rpc, logger);
-  try {
-    const account = await client.account();
-    if (requireChatGpt && account.account?.type !== 'chatgpt') {
-      throw new AppError('DESKTOP_AUTH_REQUIRED', 'Codex App Server no esta autenticado con ChatGPT. Inicia sesion en Codex Desktop y vuelve a intentar.');
-    }
-    return { binary, client };
-  } catch (error) {
-    await client.close();
-    throw error;
-  }
-}
-
 function createAbortController(): { controller: AbortController; cleanup(): void } {
   const controller = new AbortController();
   const abort = () => controller.abort(new AppError('INTERRUPTED', 'Interrumpido por el usuario.', 130));
@@ -159,204 +135,73 @@ function output(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
-function terminalExitCode(state: RunState): number {
-  if (state.status === 'completed') return 0;
-  if (state.status === 'paused') return 130;
-  if (state.status === 'budgetLimited') return 3;
-  if (state.status === 'failed') return 1;
-  return 2;
-}
-
-function requiresWorkspaceQuarantine(error: unknown): boolean {
-  return error instanceof AppError && new Set([
-    'HOST_PROCESS_UNCERTAIN',
-    'PROCESS_TREE_TERMINATION_UNCERTAIN',
-    'PRIVILEGE_CLEANUP_UNCERTAIN',
-    'REMOTE_STATE_UNCERTAIN',
-  ]).has(error.code);
-}
-
 async function executeRun(args: ParsedArgs): Promise<number> {
   requirePositionals(args, 1, 'codex-infinite run "objetivo" [opciones]');
-  const objective = args.positionals[0]!.trim();
-  if (!objective || objective.length > 4000) throw new AppError('INVALID_OBJECTIVE', 'El objetivo debe tener entre 1 y 4000 caracteres.');
-  const baseline = await resolveGitWorkspace(value(args, 'dir') ?? process.cwd());
   const effortValue = value(args, 'effort');
   if (effortValue && !EFFORTS.has(effortValue)) throw new AppError('INVALID_ARGUMENT', 'Nivel --effort invalido.');
   const tokenBudgetRaw = value(args, 'token-budget');
   const tokenBudget = tokenBudgetRaw === undefined ? null : positiveNumber(tokenBudgetRaw, 0, 'token-budget', true, 2_000_000_000);
-  const dangerFullAccess = args.flags.has('danger-full-access');
-  const name = value(args, 'name')?.trim() || `Infinite: ${objective.replace(/\s+/g, ' ').slice(0, 72)}`;
-  if (name.length > 128) throw new AppError('INVALID_ARGUMENT', '--name no puede exceder 128 caracteres.');
-  const verifyCommands = args.values.get('verify') ?? [];
-  if (verifyCommands.length > 20 || verifyCommands.some((command) => command.length > 4000)) {
-    throw new AppError('INVALID_ARGUMENT', '--verify admite hasta 20 comandos de 4000 caracteres cada uno.');
-  }
-  const state = createRunState({
-    workspace: baseline.root,
-    objective,
-    name,
-    maxTurns: positiveNumber(value(args, 'max-turns'), 30, 'max-turns', true, 1000),
-    turnTimeoutMs: positiveNumber(value(args, 'turn-minutes'), 45, 'turn-minutes', false, 1440) * 60_000,
-    maxWallTimeMs: positiveNumber(value(args, 'max-hours'), 8, 'max-hours', false, 720) * 60 * 60_000,
-    tokenBudget,
-    network: args.flags.has('network') || dangerFullAccess,
-    dangerFullAccess,
-    verifyCommands,
-    model: value(args, 'model') ?? null,
-    effort: effortValue ? effortValue as RunState['effort'] : null,
-    gitBaseline: baseline,
-  });
-  const logger = createLogger(args.flags.has('verbose'));
-  const lock = await acquireWorkspaceLock(state.workspace, state.runId);
   const abort = createAbortController();
-  let client: CodexDesktopClient | null = null;
-  let finalState: RunState | null = null;
-  let runError: unknown = null;
+  const logger = createLogger(args.flags.has('verbose'));
   try {
-    await saveRun(state);
-    if (dangerFullAccess) logger.warn('danger-full-access habilitado explicitamente.');
-    ({ client } = await openClient(state.workspace, value(args, 'bin'), logger));
-    finalState = await supervise(client, state, logger, { resume: false, signal: abort.controller.signal });
-  } catch (error) {
-    runError = error;
-    state.status = 'failed';
-    state.completedAt = new Date().toISOString();
-    state.lastError = sanitizeLog(errorMessage(error), 4000);
-    await saveRun(state).catch(() => undefined);
-    throw error;
+    const state = await startGoal({
+    objective: args.positionals[0]!,
+    directory: value(args, 'dir') ?? process.cwd(),
+    name: value(args, 'name'),
+    maxTurns: positiveNumber(value(args, 'max-turns'), 30, 'max-turns', true, 1000),
+    turnMinutes: positiveNumber(value(args, 'turn-minutes'), 45, 'turn-minutes', false, 1440),
+    maxHours: positiveNumber(value(args, 'max-hours'), 8, 'max-hours', false, 720),
+    tokenBudget,
+    network: args.flags.has('network'),
+    dangerFullAccess: args.flags.has('danger-full-access'),
+    verifyCommands: args.values.get('verify') ?? [],
+    model: value(args, 'model'),
+    effort: effortValue ? effortValue as RunState['effort'] : null,
+    binary: value(args, 'bin'),
+    }, abort.controller.signal, logger);
+    output(state);
+    return terminalExitCode(state);
   } finally {
     abort.cleanup();
-    let closeError: unknown = null;
-    if (client) {
-      try {
-        await client.close();
-      } catch (error) {
-        closeError = error;
-        state.status = 'failed';
-        state.completedAt = new Date().toISOString();
-        state.lastError = sanitizeLog(errorMessage(error), 4000);
-        await saveRun(state).catch(() => undefined);
-      }
-    }
-    const quarantineReason = closeError ?? (requiresWorkspaceQuarantine(runError) ? runError : null);
-    let quarantineError: unknown = null;
-    if (quarantineReason) {
-      try {
-        await lock.quarantine(errorMessage(quarantineReason));
-      } catch (error) {
-        quarantineError = error;
-      }
-    }
-    await lock.release().catch((error) => logger.error(`No se pudo liberar el lock: ${errorMessage(error)}`));
-    if (quarantineError) throw new AppError('LOCK_QUARANTINE_FAILED', `No se pudo poner el workspace en cuarentena: ${errorMessage(quarantineError)}`, 1, { cause: quarantineError });
-    if (closeError) throw closeError;
   }
-  output(finalState!);
-  return terminalExitCode(finalState!);
 }
 
 async function executeResume(args: ParsedArgs): Promise<number> {
   requirePositionals(args, 1, 'codex-infinite resume <run-id>');
-  const state = await loadRun(args.positionals[0]!);
-  if (state.status === 'completed') {
-    output(state);
-    return 0;
-  }
-  const baseline = await resolveGitWorkspace(value(args, 'dir') ?? process.cwd());
-  const normalize = (candidate: string) => process.platform === 'win32' ? path.resolve(candidate).toLowerCase() : path.resolve(candidate);
-  if (!path.isAbsolute(state.workspace) || normalize(baseline.root) !== normalize(state.workspace)) {
-    throw new AppError('WORKSPACE_MISMATCH', 'Ejecuta resume desde el workspace original o indica --dir con su ruta.');
-  }
-  const verifyCommands = args.values.get('verify') ?? [];
-  if (verifyCommands.length > 20 || verifyCommands.some((command) => command.length > 4000)) {
-    throw new AppError('INVALID_ARGUMENT', '--verify admite hasta 20 comandos de 4000 caracteres cada uno.');
-  }
-  state.verifyCommands = verifyCommands;
-  state.dangerFullAccess = args.flags.has('danger-full-access');
-  state.network = args.flags.has('network') || state.dangerFullAccess;
   const logger = createLogger(args.flags.has('verbose'));
-  const lock = await acquireWorkspaceLock(state.workspace, state.runId);
   const abort = createAbortController();
-  let client: CodexDesktopClient | null = null;
-  let finalState: RunState | null = null;
-  let runError: unknown = null;
   try {
-    ({ client } = await openClient(state.workspace, value(args, 'bin'), logger));
-    finalState = await supervise(client, state, logger, { resume: true, signal: abort.controller.signal });
-  } catch (error) {
-    runError = error;
-    state.status = 'failed';
-    state.completedAt = new Date().toISOString();
-    state.lastError = sanitizeLog(errorMessage(error), 4000);
-    await saveRun(state).catch(() => undefined);
-    throw error;
+    const state = await resumeGoal({
+      runId: args.positionals[0]!,
+      directory: value(args, 'dir') ?? process.cwd(),
+      verifyCommands: args.values.get('verify') ?? [],
+      network: args.flags.has('network'),
+      dangerFullAccess: args.flags.has('danger-full-access'),
+      binary: value(args, 'bin'),
+    }, abort.controller.signal, logger);
+    output(state);
+    return terminalExitCode(state);
   } finally {
     abort.cleanup();
-    let closeError: unknown = null;
-    if (client) {
-      try {
-        await client.close();
-      } catch (error) {
-        closeError = error;
-        state.status = 'failed';
-        state.completedAt = new Date().toISOString();
-        state.lastError = sanitizeLog(errorMessage(error), 4000);
-        await saveRun(state).catch(() => undefined);
-      }
-    }
-    const quarantineReason = closeError ?? (requiresWorkspaceQuarantine(runError) ? runError : null);
-    let quarantineError: unknown = null;
-    if (quarantineReason) {
-      try {
-        await lock.quarantine(errorMessage(quarantineReason));
-      } catch (error) {
-        quarantineError = error;
-      }
-    }
-    await lock.release().catch((error) => logger.error(`No se pudo liberar el lock: ${errorMessage(error)}`));
-    if (quarantineError) throw new AppError('LOCK_QUARANTINE_FAILED', `No se pudo poner el workspace en cuarentena: ${errorMessage(quarantineError)}`, 1, { cause: quarantineError });
-    if (closeError) throw closeError;
   }
-  output(finalState!);
-  return terminalExitCode(finalState!);
 }
 
 async function executeThreads(args: ParsedArgs): Promise<number> {
   requirePositionals(args, 0, 'codex-infinite threads [opciones]');
-  const cwd = path.resolve(value(args, 'dir') ?? process.cwd());
+  const directory = value(args, 'dir');
   const limit = positiveNumber(value(args, 'limit'), 50, 'limit', true);
   const logger = createLogger(args.flags.has('verbose'));
-  const { client } = await openClient(cwd, value(args, 'bin'), logger);
-  try {
-    output(await client.listThreads(value(args, 'dir') ? cwd : undefined, limit));
-    return 0;
-  } finally {
-    await client.close();
-  }
+  output(await listDesktopThreads(directory ? path.resolve(directory) : null, limit, value(args, 'bin') ?? null, logger));
+  return 0;
 }
 
 async function executeDoctor(args: ParsedArgs): Promise<number> {
   requirePositionals(args, 0, 'codex-infinite doctor [opciones]');
-  const cwd = path.resolve(value(args, 'dir') ?? process.cwd());
+  const directory = value(args, 'dir');
   const logger = createLogger(args.flags.has('verbose'));
-  const { binary, client } = await openClient(cwd, value(args, 'bin'), logger, false);
-  try {
-    const account = await client.account();
-    const threads = await client.listThreads(undefined, 1);
-    const ok = account.account?.type === 'chatgpt';
-    output({
-      ok,
-      binary,
-      authentication: account.account?.type ?? null,
-      planType: account.account?.planType ?? null,
-      desktopThreadsVisible: threads.length > 0,
-      dataDirectory: path.join(process.env.CODEX_HOME ? path.resolve(process.env.CODEX_HOME) : path.join(os.homedir(), '.codex'), 'infinite-agent'),
-    });
-    return ok ? 0 : 2;
-  } finally {
-    await client.close();
-  }
+  const result = await doctorDesktop(directory ? path.resolve(directory) : null, value(args, 'bin') ?? null, logger);
+  output(result);
+  return result.ok ? 0 : 2;
 }
 
 export async function runCli(argv: string[]): Promise<number> {

@@ -29,3 +29,28 @@ test('host verification preserves quoted Windows command payloads', async (t) =>
   assert.equal(result.ok, true, result.summary.join('\n'));
   assert.equal(await readFile(marker, 'utf8'), 'ok');
 });
+
+test('host verification runs quoted POSIX commands with the trusted PATH', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX only');
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'codex infinite verify '));
+  const marker = path.join(temp, 'quoted marker.txt');
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const script = `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ok')`;
+  const result = await verifyWorkspace(process.cwd(), [`node -e ${JSON.stringify(script)}`], 10_000);
+
+  assert.equal(result.ok, true, result.summary.join('\n'));
+  assert.equal(await readFile(marker, 'utf8'), 'ok');
+});
+
+test('host verification drains POSIX background descendants before accepting PASS', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX only');
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'codex-infinite-verify-drain-'));
+  const marker = path.join(temp, 'survived.txt');
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const script = `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'survived'), 1000)`;
+  const result = await verifyWorkspace(process.cwd(), [`node -e ${JSON.stringify(script)} &`], 10_000);
+
+  assert.equal(result.ok, true, result.summary.join('\n'));
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  await assert.rejects(() => readFile(marker, 'utf8'), { code: 'ENOENT' });
+});

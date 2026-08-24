@@ -9,19 +9,24 @@ const MAX_OUTPUT_BYTES = 256 * 1024;
 let pinnedGit: { path: string; digest: string } | null = null;
 
 async function protectedGitExecutable(): Promise<string> {
-  if (process.platform !== 'win32' || process.arch !== 'x64') {
-    throw new AppError('UNSUPPORTED_PLATFORM', 'La verificacion Git protegida requiere Windows x64.');
-  }
   if (!pinnedGit) {
-    const candidates = [
-      'C:\\Program Files\\Git\\cmd\\git.exe',
-      'C:\\Program Files\\Git\\bin\\git.exe',
-      'C:\\Program Files (x86)\\Git\\cmd\\git.exe',
-    ];
+    const candidates = process.platform === 'win32'
+      ? [
+        'C:\\Program Files\\Git\\cmd\\git.exe',
+        'C:\\Program Files\\Git\\bin\\git.exe',
+        'C:\\Program Files (x86)\\Git\\cmd\\git.exe',
+      ]
+      : process.platform === 'darwin'
+        ? ['/usr/bin/git']
+        : process.platform === 'linux'
+          ? ['/usr/bin/git', '/bin/git']
+          : [];
     for (const candidate of candidates) {
       try {
         const resolved = await realpath(candidate);
-        if (!(await stat(resolved)).isFile()) continue;
+        const metadata = await stat(resolved);
+        if (!metadata.isFile()) continue;
+        if (process.platform !== 'win32' && (metadata.uid !== 0 || (metadata.mode & 0o022) !== 0)) continue;
         const bytes = await readFile(resolved);
         pinnedGit = { path: resolved, digest: createHash('sha256').update(bytes).digest('hex') };
         break;
@@ -30,7 +35,12 @@ async function protectedGitExecutable(): Promise<string> {
       }
     }
     if (!pinnedGit) {
-      throw new AppError('TRUSTED_GIT_NOT_FOUND', 'Instala Git for Windows para todos los usuarios en C:\\Program Files\\Git.');
+      throw new AppError(
+        'TRUSTED_GIT_NOT_FOUND',
+        process.platform === 'win32'
+          ? 'Instala Git for Windows para todos los usuarios en C:\\Program Files\\Git.'
+          : 'No se encontro un Git del sistema, propiedad de root y no modificable por usuarios.',
+      );
     }
   }
   const bytes = await readFile(pinnedGit.path).catch((error) => {
@@ -67,7 +77,7 @@ function runCommand(command: string, args: string[], cwd: string, timeoutMs = 30
       cwd,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: minimalWindowsEnvironment({
+      env: minimalWindowsEnvironment(process.platform === 'win32' ? {
         PATH: [
           'C:\\Windows\\System32',
           'C:\\Windows',
@@ -80,6 +90,13 @@ function runCommand(command: string, args: string[], cwd: string, timeoutMs = 30
         GIT_CONFIG_GLOBAL: 'NUL',
         GIT_TERMINAL_PROMPT: '0',
         GCM_INTERACTIVE: 'Never',
+      } : {
+        PATH: [path.dirname(command), '/usr/bin', '/bin'].join(path.delimiter),
+        LANG: 'C',
+        LC_ALL: 'C',
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_TERMINAL_PROMPT: '0',
       }),
     }) as ChildProcessWithoutNullStreams;
     const append = (current: string, chunk: Buffer) => (current + chunk.toString('utf8')).slice(0, MAX_OUTPUT_BYTES);
@@ -97,7 +114,14 @@ function runCommand(command: string, args: string[], cwd: string, timeoutMs = 30
       stderr = append(stderr, Buffer.from(error.message));
       finish(null, false);
     });
-    child.once('exit', (exitCode) => { if (!terminating) finish(exitCode, false); });
+    child.once('exit', (exitCode) => {
+      if (terminating) return;
+      terminating = true;
+      void terminateProcessTree(child).then(
+        () => finish(exitCode, false),
+        (error) => failTermination(error),
+      );
+    });
 
     function stop(): void {
       if (settled || terminating) return;

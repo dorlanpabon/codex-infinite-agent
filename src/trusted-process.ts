@@ -48,6 +48,17 @@ export async function resolveWindowsSystemExecutable(relativePath: string): Prom
 }
 
 export function minimalWindowsEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  if (process.platform !== 'win32') {
+    const environment = { ...extra };
+    delete environment.SystemRoot;
+    delete environment.WINDIR;
+    delete environment.SystemDrive;
+    delete environment.COMSPEC;
+    delete environment.ProgramFiles;
+    delete environment['ProgramFiles(x86)'];
+    delete environment.PATHEXT;
+    return environment;
+  }
   const environment: NodeJS.ProcessEnv = {
     SystemRoot: 'C:\\Windows',
     WINDIR: 'C:\\Windows',
@@ -60,7 +71,8 @@ function verifiedWindowsJobWrapper(): string {
   if (process.platform !== 'win32' || process.arch !== 'x64') {
     throw new AppError('UNSUPPORTED_PLATFORM', 'El guardia de procesos requiere Windows x64.');
   }
-  const candidate = path.resolve(
+  const packagedMarker = `${path.sep}app.asar${path.sep}`;
+  const bundledCandidate = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
     '..',
     'native',
@@ -69,6 +81,9 @@ function verifiedWindowsJobWrapper(): string {
     'windows-x64',
     'codex-infinite-job-wrapper.exe',
   );
+  const candidate = bundledCandidate.includes(packagedMarker)
+    ? bundledCandidate.replace(packagedMarker, `${path.sep}app.asar.unpacked${path.sep}`)
+    : bundledCandidate;
   let bytes: Buffer;
   try {
     bytes = readFileSync(candidate);
@@ -86,14 +101,17 @@ export function spawnManagedProcess(command: string, args: readonly string[], op
   if (!path.isAbsolute(command)) {
     throw new AppError('UNTRUSTED_EXECUTABLE_PATH', 'Los procesos administrados requieren una ruta absoluta.');
   }
-  if (process.platform !== 'win32') {
-    throw new AppError('UNSUPPORTED_PLATFORM', 'La supervision durable de procesos solo esta soportada en Windows x64.');
+  if (process.platform === 'win32') {
+    return spawn(
+      verifiedWindowsJobWrapper(),
+      ['--parent-pid', String(process.pid), '--', command, ...args],
+      { ...options, shell: false, detached: false },
+    );
   }
-  return spawn(
-    verifiedWindowsJobWrapper(),
-    ['--parent-pid', String(process.pid), '--', command, ...args],
-    { ...options, shell: false, detached: false },
-  );
+  if (process.platform !== 'darwin' && process.platform !== 'linux') {
+    throw new AppError('UNSUPPORTED_PLATFORM', `La supervision durable de procesos no soporta ${process.platform}.`);
+  }
+  return spawn(command, [...args], { ...options, shell: false, detached: true });
 }
 
 function childExited(child: ChildProcess): boolean {

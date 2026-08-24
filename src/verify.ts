@@ -1,5 +1,5 @@
 import type { ChildProcess } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { sanitizeLog } from './log.js';
@@ -24,26 +24,38 @@ interface VerificationCheck {
 async function runShell(command: string, cwd: string, timeoutMs: number, signal?: AbortSignal): Promise<VerificationCheck> {
   let shell: string;
   try {
-    shell = process.platform === 'win32'
-      ? await resolveWindowsSystemExecutable(path.join('System32', 'cmd.exe'))
-      : '/bin/sh';
+    if (process.platform === 'win32') {
+      shell = await resolveWindowsSystemExecutable(path.join('System32', 'cmd.exe'));
+    } else {
+      const resolved = await realpath('/bin/sh');
+      const metadata = await stat(resolved);
+      if (!metadata.isFile() || metadata.uid !== 0 || (metadata.mode & 0o022) !== 0) {
+        throw new AppError('UNTRUSTED_SHELL', '/bin/sh no pertenece al sistema protegido.');
+      }
+      shell = resolved;
+    }
   } catch (error) {
     return { label: command, ok: false, output: sanitizeLog(error instanceof Error ? error.message : String(error), 8000) };
   }
-  const scriptDirectory = await mkdtemp(path.join(os.tmpdir(), 'codex-infinite-verify-'));
-  const scriptPath = path.join(scriptDirectory, 'verify.cmd');
-  await writeFile(scriptPath, `@echo off\r\n${command}\r\n`, { encoding: 'utf8', mode: 0o600 });
+  const scriptDirectory = process.platform === 'win32'
+    ? await mkdtemp(path.join(os.tmpdir(), 'codex-infinite-verify-'))
+    : null;
+  const scriptPath = scriptDirectory ? path.join(scriptDirectory, 'verify.cmd') : null;
+  if (scriptPath) await writeFile(scriptPath, `@echo off\r\n${command}\r\n`, { encoding: 'utf8', mode: 0o600 });
+  const cleanup = async (): Promise<void> => {
+    if (scriptDirectory) await rm(scriptDirectory, { recursive: true, force: true });
+  };
   return new Promise((resolve, reject) => {
     let output = '';
     let settled = false;
     let terminating = false;
     let child: ChildProcess;
     try {
-      child = spawnManagedProcess(shell, process.platform === 'win32' ? ['/d', '/s', '/c', scriptPath] : ['-c', command], {
+      child = spawnManagedProcess(shell, process.platform === 'win32' ? ['/d', '/s', '/c', scriptPath!] : ['-c', command], {
         cwd,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: minimalWindowsEnvironment({
+        env: minimalWindowsEnvironment(process.platform === 'win32' ? {
           PATH: [
             'C:\\Windows\\System32',
             'C:\\Windows',
@@ -58,10 +70,19 @@ async function runShell(command: string, cwd: string, timeoutMs: number, signal?
           GIT_CONFIG_GLOBAL: 'NUL',
           GIT_TERMINAL_PROMPT: '0',
           NPM_CONFIG_USERCONFIG: 'NUL',
+        } : {
+          PATH: [path.dirname(process.execPath), '/usr/local/bin', '/usr/bin', '/bin'].join(path.delimiter),
+          LANG: 'C',
+          LC_ALL: 'C',
+          TMPDIR: os.tmpdir(),
+          GIT_CONFIG_NOSYSTEM: '1',
+          GIT_CONFIG_GLOBAL: '/dev/null',
+          GIT_TERMINAL_PROMPT: '0',
+          NPM_CONFIG_USERCONFIG: '/dev/null',
         }),
       });
     } catch (error) {
-      void rm(scriptDirectory, { recursive: true, force: true }).finally(() => {
+      void cleanup().finally(() => {
         resolve({ label: command, ok: false, output: sanitizeLog(error instanceof Error ? error.message : String(error), 8000) });
       });
       return;
@@ -81,7 +102,14 @@ async function runShell(command: string, cwd: string, timeoutMs: number, signal?
     const onAbort = () => stop('aborted');
     signal?.addEventListener('abort', onAbort, { once: true });
     child.once('error', (error) => finish(false, `${output}\n${error.message}`));
-    child.once('exit', (code) => { if (!terminating) finish(code === 0, output); });
+    child.once('exit', (code) => {
+      if (terminating) return;
+      terminating = true;
+      void terminateProcessTree(child).then(
+        () => finish(code === 0, output),
+        (error) => failTermination(error),
+      );
+    });
     if (signal?.aborted) onAbort();
 
     function finish(ok: boolean, raw: string): void {
@@ -89,7 +117,7 @@ async function runShell(command: string, cwd: string, timeoutMs: number, signal?
       settled = true;
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
-      void rm(scriptDirectory, { recursive: true, force: true }).finally(() => {
+      void cleanup().finally(() => {
         resolve({ label: command, ok, output: sanitizeLog(raw.trim(), 8000) });
       });
     }
@@ -99,7 +127,7 @@ async function runShell(command: string, cwd: string, timeoutMs: number, signal?
       settled = true;
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
-      void rm(scriptDirectory, { recursive: true, force: true }).finally(() => {
+      void cleanup().finally(() => {
         reject(new AppError(
           'HOST_PROCESS_UNCERTAIN',
           `No se pudo confirmar la terminacion de --verify: ${error instanceof Error ? error.message : String(error)}`,

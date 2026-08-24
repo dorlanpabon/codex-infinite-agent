@@ -1,4 +1,4 @@
-import { access, readdir, stat } from 'node:fs/promises';
+import { access, readdir, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { constants } from 'node:fs';
 import { AppError, errorMessage } from '../errors.js';
@@ -10,11 +10,21 @@ import {
 } from '../trusted-process.js';
 
 const PROBE_OUTPUT_LIMIT = 128 * 1024;
+export const FIXED_DESKTOP_BINARIES = Object.freeze({
+  darwin: '/Applications/ChatGPT.app/Contents/Resources/codex',
+  linux: '/usr/lib/chatgpt/resources/codex',
+});
+
+export function isSupportedDesktopPlatform(platform: NodeJS.Platform, arch: string): boolean {
+  return (platform === 'win32' && arch === 'x64')
+    || (platform === 'darwin' && arch === 'arm64')
+    || (platform === 'linux' && (arch === 'x64' || arch === 'arm64'));
+}
 
 export interface BinaryInfo {
   path: string;
   version: string;
-  source: 'explicit' | 'environment' | 'desktop-cache';
+  source: 'explicit' | 'environment' | 'desktop-cache' | 'desktop-bundle' | 'desktop-package';
   signedByOpenAI: boolean | null;
 }
 
@@ -54,8 +64,12 @@ export function runProbe(binary: string, args: string[], timeoutMs = 5000): Prom
     }
     let timeoutTriggered = false;
     const timer = setTimeout(() => {
+      if (settled || timeoutTriggered) return;
       timeoutTriggered = true;
-      void terminateProcessTree(child).catch((error) => failTermination(error));
+      void terminateProcessTree(child).then(
+        () => finish(null, true),
+        (error) => failTermination(error),
+      );
     }, timeoutMs);
 
     const append = (current: string, chunk: Buffer) => {
@@ -65,7 +79,13 @@ export function runProbe(binary: string, args: string[], timeoutMs = 5000): Prom
     stdoutStream.on('data', (chunk: Buffer) => { stdout = append(stdout, chunk); });
     stderrStream.on('data', (chunk: Buffer) => { stderr = append(stderr, chunk); });
     child.once('error', () => finish(null, false));
-    child.once('exit', (code) => finish(code, timeoutTriggered));
+    child.once('exit', (code) => {
+      if (timeoutTriggered) return;
+      void terminateProcessTree(child).then(
+        () => finish(code, false),
+        (error) => failTermination(error),
+      );
+    });
 
     function finish(exitCode: number | null, timedOut: boolean) {
       if (settled) return;
@@ -148,6 +168,72 @@ async function verifyWindowsSignature(candidate: string): Promise<boolean> {
   }
 }
 
+async function verifyMacSignature(candidate: string): Promise<boolean> {
+  if (process.platform !== 'darwin') return false;
+  const bundle = '/Applications/ChatGPT.app';
+  const codesign = '/usr/bin/codesign';
+  const spctl = '/usr/sbin/spctl';
+  if (!await isExecutableFile(codesign) || !await isExecutableFile(spctl)) return false;
+  const bundleVerification = await runProbe(codesign, ['--verify', '--deep', '--strict', '--verbose=2', bundle], 15_000);
+  if (bundleVerification.exitCode !== 0) return false;
+  const details = await runProbe(codesign, ['--display', '--verbose=4', bundle]);
+  const detailText = `${details.stdout}\n${details.stderr}`;
+  if (details.exitCode !== 0 || !/^TeamIdentifier=2DC432GLL2$/m.test(detailText)) return false;
+  const assessment = await runProbe(spctl, ['--assess', '--type', 'execute', '--verbose=2', bundle], 15_000);
+  if (assessment.exitCode !== 0) return false;
+  const resolved = await realpath(candidate).catch(() => null);
+  const resources = await realpath('/Applications/ChatGPT.app/Contents/Resources').catch(() => null);
+  if (!resolved || !resources) return false;
+  const relative = path.relative(resources, resolved);
+  return relative === 'codex';
+}
+
+async function rootOwnedAndImmutable(candidate: string, root: string): Promise<boolean> {
+  const resolvedCandidate = await realpath(candidate).catch(() => null);
+  const resolvedRoot = await realpath(root).catch(() => null);
+  if (!resolvedCandidate || !resolvedRoot) return false;
+  const relative = path.relative(resolvedRoot, resolvedCandidate);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) return false;
+  let current = resolvedCandidate;
+  while (true) {
+    const metadata = await stat(current).catch(() => null);
+    if (!metadata || metadata.uid !== 0 || (metadata.mode & 0o022) !== 0) return false;
+    if (current === resolvedRoot) return true;
+    const parent = path.dirname(current);
+    if (parent === current) return false;
+    current = parent;
+  }
+}
+
+async function verifyLinuxPackage(candidate: string): Promise<boolean> {
+  if (process.platform !== 'linux') return false;
+  const expected = FIXED_DESKTOP_BINARIES.linux;
+  const resolved = await realpath(candidate).catch(() => null);
+  const resolvedExpected = await realpath(expected).catch(() => null);
+  if (!resolved || !resolvedExpected || resolved !== resolvedExpected) return false;
+  if (!await rootOwnedAndImmutable(resolved, '/usr/lib/chatgpt')) return false;
+
+  const dpkgQuery = '/usr/bin/dpkg-query';
+  const dpkg = '/usr/bin/dpkg';
+  if (await isExecutableFile(dpkgQuery) && await isExecutableFile(dpkg)) {
+    const owner = await runProbe(dpkgQuery, ['-S', expected]);
+    if (owner.exitCode !== 0 || !/^chatgpt(?::[^:]+)?:\s+\/usr\/lib\/chatgpt\/resources\/codex$/m.test(owner.stdout.trim())) return false;
+    const status = await runProbe(dpkgQuery, ['-W', '-f=${db:Status-Abbrev}', 'chatgpt']);
+    if (status.exitCode !== 0 || status.stdout.trim() !== 'ii') return false;
+    const verified = await runProbe(dpkg, ['--verify', 'chatgpt'], 15_000);
+    return verified.exitCode === 0 && `${verified.stdout}\n${verified.stderr}`.trim() === '';
+  }
+
+  const rpm = '/usr/bin/rpm';
+  if (await isExecutableFile(rpm)) {
+    const owner = await runProbe(rpm, ['-qf', expected, '--queryformat', '%{NAME}']);
+    if (owner.exitCode !== 0 || owner.stdout.trim() !== 'chatgpt') return false;
+    const verified = await runProbe(rpm, ['--verify', 'chatgpt'], 15_000);
+    return verified.exitCode === 0 && `${verified.stdout}\n${verified.stderr}`.trim() === '';
+  }
+  return false;
+}
+
 async function desktopCacheCandidates(): Promise<string[]> {
   if (process.platform !== 'win32') return [];
   const localAppData = process.env.LOCALAPPDATA;
@@ -172,25 +258,39 @@ async function desktopCacheCandidates(): Promise<string[]> {
   return ranked.sort((a, b) => b.modified - a.modified).map(({ candidate }) => candidate);
 }
 
-function isDesktopBundlePath(candidate: string): boolean {
-  const resolved = path.resolve(candidate);
+async function isDesktopBundlePath(candidate: string): Promise<boolean> {
+  const resolved = await realpath(path.resolve(candidate)).catch(() => null);
+  if (!resolved) return false;
   if (process.platform === 'win32') {
     const localAppData = process.env.LOCALAPPDATA;
     if (!localAppData) return false;
-    const root = path.resolve(localAppData, 'OpenAI', 'Codex', 'bin');
+    const root = await realpath(path.resolve(localAppData, 'OpenAI', 'Codex', 'bin')).catch(() => null);
+    if (!root) return false;
     const relative = path.relative(root, resolved);
     return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)
       && path.basename(resolved).toLowerCase() === 'codex.exe';
   }
+  if (process.platform === 'darwin') {
+    return resolved === await realpath(FIXED_DESKTOP_BINARIES.darwin).catch(() => null);
+  }
+  if (process.platform === 'linux') {
+    return resolved === await realpath(FIXED_DESKTOP_BINARIES.linux).catch(() => null);
+  }
   return false;
 }
 
-async function validateCandidate(candidate: string, source: BinaryInfo['source'], requireSignature: boolean): Promise<BinaryInfo | null> {
-  const resolved = path.resolve(candidate);
-  if (!isDesktopBundlePath(resolved)) return null;
+async function validateCandidate(candidate: string, source: BinaryInfo['source']): Promise<BinaryInfo | null> {
+  const resolved = await realpath(path.resolve(candidate)).catch(() => null);
+  if (!resolved || !await isDesktopBundlePath(resolved)) return null;
   if (!await isExecutableFile(resolved)) return null;
-  const signedByOpenAI = process.platform === 'win32' ? await verifyWindowsSignature(resolved) : null;
-  if (requireSignature && signedByOpenAI !== true) return null;
+  const signedByOpenAI = process.platform === 'win32'
+    ? await verifyWindowsSignature(resolved)
+    : process.platform === 'darwin'
+      ? await verifyMacSignature(resolved)
+      : process.platform === 'linux'
+        ? await verifyLinuxPackage(resolved)
+        : false;
+  if (signedByOpenAI !== true) return null;
 
   const versionProbe = await runProbe(resolved, ['--version']);
   const version = `${versionProbe.stdout}\n${versionProbe.stderr}`.trim().split(/\r?\n/)[0] ?? '';
@@ -202,13 +302,13 @@ async function validateCandidate(candidate: string, source: BinaryInfo['source']
 }
 
 export async function discoverCodexBinary(explicit?: string): Promise<BinaryInfo> {
-  if (process.platform !== 'win32' || process.arch !== 'x64') {
-    throw new AppError('UNSUPPORTED_PLATFORM', 'Codex Infinite Agent requiere Codex Desktop en Windows x64.');
+  if (!isSupportedDesktopPlatform(process.platform, process.arch)) {
+    throw new AppError('UNSUPPORTED_PLATFORM', `Codex Infinite Agent no soporta ${process.platform}/${process.arch}.`);
   }
   const configured = explicit || process.env.CODEX_APP_SERVER_BIN;
   if (configured) {
     const source = explicit ? 'explicit' : 'environment';
-    const info = await validateCandidate(configured, source, process.platform === 'win32');
+    const info = await validateCandidate(configured, source);
     if (!info) {
       throw new AppError('INVALID_CODEX_BINARY', `El binario configurado no pertenece a un App Server compatible y verificable: ${path.resolve(configured)}`);
     }
@@ -216,7 +316,11 @@ export async function discoverCodexBinary(explicit?: string): Promise<BinaryInfo
   }
 
   const groups: Array<{ source: BinaryInfo['source']; candidates: string[] }> = [
-    { source: 'desktop-cache', candidates: await desktopCacheCandidates() },
+    ...(process.platform === 'win32'
+      ? [{ source: 'desktop-cache' as const, candidates: await desktopCacheCandidates() }]
+      : process.platform === 'darwin'
+        ? [{ source: 'desktop-bundle' as const, candidates: [FIXED_DESKTOP_BINARIES.darwin] }]
+        : [{ source: 'desktop-package' as const, candidates: [FIXED_DESKTOP_BINARIES.linux] }]),
   ];
 
   const seen = new Set<string>();
@@ -225,13 +329,13 @@ export async function discoverCodexBinary(explicit?: string): Promise<BinaryInfo
       const key = process.platform === 'win32' ? path.resolve(candidate).toLowerCase() : path.resolve(candidate);
       if (seen.has(key)) continue;
       seen.add(key);
-      const info = await validateCandidate(candidate, group.source, process.platform === 'win32');
+      const info = await validateCandidate(candidate, group.source);
       if (info) return info;
     }
   }
 
   throw new AppError(
     'CODEX_DESKTOP_NOT_FOUND',
-    'No se encontro un binario firmado de Codex Desktop con App Server. Abre/actualiza Codex Desktop o define CODEX_APP_SERVER_BIN.',
+    'No se encontro un binario verificable de Codex Desktop con App Server. Instala/actualiza ChatGPT Desktop o define CODEX_APP_SERVER_BIN dentro de su bundle oficial.',
   );
 }

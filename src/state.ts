@@ -10,6 +10,10 @@ import { sanitizeLog } from './log.js';
 
 const WINDOWS_GUARD_DRAIN_GRACE_MS = 8500;
 
+export function staleWorkspaceLockMustQuarantine(platform: NodeJS.Platform): boolean {
+  return platform !== 'win32';
+}
+
 export type RunStatus = 'initializing' | 'running' | 'verifying' | 'paused' | 'blocked' | 'budgetLimited' | 'completed' | 'failed';
 
 export interface VerificationRecord {
@@ -369,6 +373,15 @@ export async function acquireWorkspaceLock(workspace: string, runId: string): Pr
   }
   if (staleOwnerMetadata && process.platform === 'win32') {
     await new Promise((resolve) => setTimeout(resolve, WINDOWS_GUARD_DRAIN_GRACE_MS));
+  }
+  if (staleOwnerMetadata && staleWorkspaceLockMustQuarantine(process.platform)) {
+    const reason = 'Metadatos de bloqueo huerfanos: no se puede demostrar que el grupo de procesos anterior termino.';
+    await writePayload({ ...payload, quarantined: true, reason }).catch(async (error) => {
+      await closeServer().catch(() => undefined);
+      throw error;
+    });
+    await closeServer();
+    throw new AppError('WORKSPACE_QUARANTINED', sanitizeLog(`El workspace esta en cuarentena: ${reason}`));
   }
   await writePayload(payload).catch(async (error) => {
     await closeServer().catch(() => undefined);

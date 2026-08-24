@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -9,6 +10,7 @@ import {
   listRuns,
   loadRun,
   saveRun,
+  staleWorkspaceLockMustQuarantine,
 } from '../dist/state.js';
 
 function stateFor(workspace) {
@@ -83,6 +85,40 @@ test('workspace quarantine survives lock release and fails closed', async (t) =>
   await first.quarantine('uncertain process cleanup');
   await first.release();
   await assert.rejects(() => acquireWorkspaceLock(workspace, 'run-after-quarantine'), /cuarentena/);
+});
+
+test('stale workspace lock policy quarantines every non-Windows platform', () => {
+  assert.equal(staleWorkspaceLockMustQuarantine('win32'), false);
+  assert.equal(staleWorkspaceLockMustQuarantine('darwin'), true);
+  assert.equal(staleWorkspaceLockMustQuarantine('linux'), true);
+});
+
+test('POSIX stale workspace metadata is quarantined before reacquisition', { skip: process.platform === 'win32' }, async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'codex-infinite-stale-lock-'));
+  const previous = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = temp;
+  t.after(async () => {
+    if (previous === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previous;
+    await rm(temp, { recursive: true, force: true });
+  });
+
+  const workspace = path.resolve(process.cwd());
+  const hash = createHash('sha256').update(workspace).digest('hex');
+  const lockPath = path.join(temp, 'infinite-agent', 'locks', `${hash}.lock`);
+  await mkdir(path.dirname(lockPath), { recursive: true });
+  await writeFile(lockPath, `${JSON.stringify({
+    token: 'orphaned-token',
+    pid: 42,
+    runId: 'orphaned-run',
+    workspace,
+    createdAt: new Date(0).toISOString(),
+  })}\n`, 'utf8');
+
+  await assert.rejects(() => acquireWorkspaceLock(workspace, 'replacement-run'), /cuarentena/);
+  const quarantined = JSON.parse(await readFile(lockPath, 'utf8'));
+  assert.equal(quarantined.quarantined, true);
+  assert.match(quarantined.reason, /no se puede demostrar/);
 });
 
 test('loadRun rejects a mismatched id and tampered security fields', async (t) => {

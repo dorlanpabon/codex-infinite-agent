@@ -12,7 +12,7 @@ Este documento define el contrato de seguridad del supervisor. Las capacidades a
 
 ## Límites de confianza
 
-- Solo se admite Windows x64. Se inicia un sidecar ubicado en el bundle de Desktop cuya firma Authenticode válida pertenezca a OpenAI; las demás plataformas fallan cerrado.
+- Solo se admiten Windows x64, macOS Apple Silicon y Linux x64/arm64. El sidecar debe pertenecer al bundle o paquete de Codex Desktop: se valida Authenticode de OpenAI en Windows, la firma y Team ID de OpenAI en macOS, y la propiedad/permisos junto con la integridad `dpkg` o `rpm` en Linux. Otras plataformas y binarios de `PATH` fallan cerrado.
 - El sidecar se conecta por `stdio`. No se publica un puerto de control ni se aceptan clientes remotos.
 - La autenticación pertenece a Codex Desktop. El supervisor no debe copiarla, persistirla ni escribirla en logs.
 - El contenido del workspace, los prompts, la salida del modelo y los threads existentes se tratan como datos no confiables.
@@ -30,6 +30,8 @@ Valores seguros por defecto:
 
 `--network` y `--danger-full-access` son ampliaciones explícitas. Deben quedar registradas en el estado de la corrida y mostrarse en su estado. Ningún prompt, Goal, thread o archivo del workspace puede activarlas.
 
+Reanudar no reutiliza autoridad persistida: la interfaz restablece red, acceso total y comandos de verificación, y exige que el operador vuelva a seleccionarlos en el diálogo.
+
 `--danger-full-access` elimina el límite normal del workspace. Antes de usarlo, revisa el repositorio, las instrucciones y las herramientas que Codex podría ejecutar.
 
 Cada `--verify` se considera código proporcionado directamente por el operador: se ejecuta mediante el shell del host, fuera del sandbox de Codex y con un `PATH` mínimo de herramientas machine-wide. No uses comandos obtenidos de archivos o instrucciones no confiables y no incluyas secretos en la línea de comandos. Los scripts y dependencias del propio repositorio siguen siendo parte del artefacto evaluado; estos checks no son una atestación frente a código deliberadamente malicioso.
@@ -46,6 +48,8 @@ Cada `--verify` se considera código proporcionado directamente por el operador:
 
 El lock no arbitra la ventana de Desktop, procesos que usen otro `CODEX_HOME` ni actores no cooperantes. Los modos `0600`/`0700` se solicitan al sistema de archivos, pero en Windows la protección efectiva también depende de las ACL heredadas del perfil.
 
+La interfaz Electron carga únicamente recursos locales mediante un protocolo propio. El renderer mantiene `nodeIntegration` deshabilitado, `contextIsolation` y sandbox habilitados, una CSP restrictiva, IPC con canales y payloads validados, y deniega navegación, nuevas ventanas, webviews y permisos. No se debe añadir contenido remoto ni exponer primitivas genéricas de filesystem, shell o IPC al renderer.
+
 ## Terminación segura
 
 No se usan sentinels ni coincidencias de texto como prueba de éxito. La terminación requiere conjuntamente:
@@ -57,7 +61,9 @@ No se usan sentinels ni coincidencias de texto como prueba de éxito. La termina
 
 Una corrida bloqueada, una solicitud de permisos, una pérdida del sidecar o una verificación fallida deben conservarse como estados no exitosos.
 
-El sidecar y cada proceso host se ejecutan bajo un Windows Job con `KILL_ON_JOB_CLOSE`. El wrapper espera que todos los procesos del Job terminen antes de confirmar su salida; al recuperar metadatos de un propietario caído, el lock respeta una ventana de drenaje antes de permitir otra corrida.
+En Windows, el sidecar y cada proceso host se ejecutan bajo un Windows Job con `KILL_ON_JOB_CLOSE`. El wrapper espera que todos los procesos del Job terminen antes de confirmar su salida; al recuperar metadatos de un propietario caído, el lock respeta una ventana de drenaje antes de permitir otra corrida.
+
+En macOS y Linux, cada proceso administrado inicia un grupo independiente. El supervisor envía `SIGTERM`, escala a `SIGKILL` y confirma el drenaje del grupo durante el cierre normal. A diferencia del Windows Job, este mecanismo no puede garantizar la terminación de descendientes si el propio supervisor recibe `SIGKILL` o sufre un crash duro; la recuperación debe tratar cualquier cierre incierto como cuarentena y exigir revisión manual.
 
 ## Registro y datos sensibles
 

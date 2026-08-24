@@ -2,14 +2,24 @@
 
 Companion durable para llevar Goals largos de Codex Desktop hasta un resultado verificable. No usa una API key, no invoca `codex exec`, no busca un `codex` instalado en `PATH` y no depende de sentinels de texto.
 
-La interfaz de este companion es una consola, pero el trabajo se ejecuta como un Goal persistido de Codex Desktop. Inicia un sidecar separado con `codex.exe app-server` desde el bundle de Desktop; no puede conectarse a los pipes privados del proceso que ya abrió la ventana. Con el mismo usuario y `CODEX_HOME`, ambos comparten autenticación ChatGPT, threads y estado Goal, y el thread creado aparece en la aplicación. No usa el flujo de Codex CLI ni requiere instalarlo por separado.
+La interfaz principal es una aplicación de escritorio para Windows, macOS y Linux. El trabajo se ejecuta como un Goal persistido mediante el App Server incluido en Codex Desktop; no puede conectarse a los canales privados del proceso que ya abrió la ventana. Con el mismo usuario y `CODEX_HOME`, ambos comparten autenticación ChatGPT, threads y estado Goal, y el thread creado aparece en Codex Desktop. No usa el flujo de Codex CLI ni requiere instalarlo por separado.
 
 ## Inicio rápido
 
-Requisitos: Windows x64, Codex Desktop con sesión ChatGPT iniciada, Git y Node.js 22 LTS.
+Requisitos: Codex Desktop con sesión ChatGPT iniciada, Git del sistema y Node.js 22 LTS. Plataformas admitidas: Windows x64, macOS Apple Silicon y Linux x64/arm64 con el paquete oficial de Codex Desktop.
 
-```powershell
+```sh
 npm install
+npm start
+```
+
+La aplicación comprueba Desktop y la sesión, permite elegir el workspace, crear o reanudar Goals, pausarlos, revisar su progreso durable y consultar los threads compartidos. Al reanudar, red, acceso total y comandos de verificación vuelven a valores seguros y deben autorizarse otra vez en el diálogo.
+
+## CLI avanzada
+
+La consola sigue disponible para automatización y diagnóstico:
+
+```sh
 npm run build
 npm link
 
@@ -17,9 +27,9 @@ codex-infinite doctor
 codex-infinite run "Implementa la tarea, valida y crea los commits" --dir . --verify "npm test" --verify "npm run build"
 ```
 
-El comando devuelve JSON con `runId`, `threadId`, estado, presupuestos, evidencia y snapshots Git. Usa el `runId` para consultar o reanudar:
+La CLI devuelve JSON con `runId`, `threadId`, estado, presupuestos, evidencia y snapshots Git. Usa el `runId` para consultar o reanudar:
 
-```powershell
+```sh
 codex-infinite status <run-id>
 codex-infinite resume <run-id> --dir . --verify "npm test" --verify "npm run build"
 ```
@@ -33,7 +43,7 @@ codex-infinite resume <run-id> --dir . --verify "npm test" --verify "npm run bui
 | `status <run-id>` | Muestra todo el estado durable. |
 | `runs` | Lista las corridas conocidas. |
 | `threads` | Lista threads persistidos compartidos con Codex Desktop. |
-| `doctor` | Comprueba bundle, firma en Windows, App Server, sesión ChatGPT y acceso al store; no ejecuta un Goal. |
+| `doctor` | Comprueba bundle o paquete de Desktop, autenticidad del binario, App Server, sesión ChatGPT y acceso al store; no ejecuta un Goal. |
 
 Opciones principales de `run`:
 
@@ -52,7 +62,7 @@ Opciones principales de `run`:
 
 El texto del Goal debe tener entre 1 y 4000 caracteres.
 
-`--verify` ejecuta secuencialmente cada comando suministrado por el usuario mediante el shell del host y fuera del sandbox de Codex. Comparten un máximo de 15 minutos o el tiempo restante de la corrida. El entorno usa únicamente herramientas machine-wide de Windows, Node.js, Git y .NET bajo `Program Files`; indica una ruta absoluta para otra herramienta confiable. No copies comandos de un repositorio no confiable.
+`--verify` ejecuta secuencialmente cada comando suministrado por el usuario mediante el shell del host y fuera del sandbox de Codex. Comparten un máximo de 15 minutos o el tiempo restante de la corrida. El entorno usa rutas de sistema confiables y excluye el workspace al resolver herramientas; indica una ruta absoluta para otra herramienta confiable. No copies comandos de un repositorio no confiable.
 
 Sin `--verify`, únicamente se ejecutan `git diff --check` y `git diff --cached --check`. Eso no compila, no corre tests, no cubre archivos untracked y no exige árbol limpio, commit ni push; añade checks explícitos para los criterios reales del proyecto.
 
@@ -60,14 +70,15 @@ Por seguridad, `resume` exige ejecutarse desde la raíz Git original (o recibirl
 
 ## Garantías
 
-- Solo descubre el binario bundled de Codex Desktop en Windows x64, exige una firma Authenticode válida de OpenAI y no usa paquetes `codex` ajenos en `PATH`.
+- Solo descubre el binario incluido en Codex Desktop y no usa paquetes `codex` ajenos en `PATH`: valida Authenticode en Windows, firma y Team ID de OpenAI en macOS, y propiedad/permisos más integridad `dpkg` o `rpm` en Linux.
 - Construye un entorno mínimo para el sidecar, excluye credenciales API y exige que `account/read` confirme autenticación `chatgpt`.
 - Usa `approvalPolicy: never`, `workspaceWrite`, red deshabilitada y raíces absolutas por defecto.
 - Rechaza aprobaciones, permisos adicionales, elicitaciones, preguntas interactivas y herramientas dinámicas; nunca autoaprueba.
 - Configura las políticas del thread antes de activar el Goal y correlaciona todas las notificaciones por `threadId` y `turnId`.
 - Persiste cada transición de forma atómica en `~/.codex/infinite-agent`, con journal JSONL y lock exclusivo por workspace.
-- Fija y verifica por SHA-256 el Git machine-wide antes y después del trabajo; no confía en un `git.exe` inyectado en `PATH` por el workspace.
-- Ejecuta App Server, Git y verificadores dentro de un Windows Job firmado por hash; el cierre cooperativo y la muerte del supervisor drenan también procesos descendientes.
+- Fija y verifica por SHA-256 el Git del sistema antes y después del trabajo; no confía en un `git` inyectado en `PATH` por el workspace.
+- En Windows ejecuta App Server, Git y verificadores dentro de un Job protegido por un wrapper fijado por hash; el cierre cooperativo y la muerte del supervisor drenan también procesos descendientes.
+- En macOS y Linux usa grupos de procesos con `SIGTERM`/`SIGKILL` y confirma su drenaje durante un cierre normal. El sistema operativo no garantiza que el grupo se drene si el supervisor recibe `SIGKILL` o sufre un crash duro.
 - Tras un crash, pausa un Goal huérfano antes de reanudarlo y reconcilia el último turno persistido. Si su resultado es ambiguo, queda bloqueado en vez de duplicar acciones.
 - Deja que la extensión Goal nativa provea `update_goal`, incluida su contabilidad de progreso; el supervisor nunca la reemplaza ni combina Goal nativo con `turn/start`.
 - Si falla una verificación, inyecta diagnóstico acotado en el historial y reactiva el mismo Goal sin reemplazar el objetivo ni reiniciar su consumo.
@@ -87,17 +98,27 @@ Si no puede confirmarse el cierre de un proceso o del estado remoto, el lock que
 
 ## Compatibilidad
 
-- Windows x64: integración probada con el bundle firmado de Codex Desktop `0.149.0-alpha.4`.
-- macOS y Linux: no soportados; el guardia nativo de procesos falla cerrado antes de iniciar el App Server.
+- Windows x64: bundle firmado de Codex Desktop y aislamiento fuerte de descendientes mediante Windows Job. La versión privada actual exige Windows en `C:` y Git for Windows machine-wide bajo `C:\Program Files`.
+- macOS Apple Silicon: bundle firmado en `/Applications/ChatGPT.app`; cierre normal mediante grupo de procesos.
+- Linux x64/arm64: paquete oficial instalado en `/usr/lib/chatgpt`; cierre normal mediante grupo de procesos.
 
-Las operaciones Goal requieren `experimentalApi` del App Server y pueden cambiar entre versiones de Desktop. `doctor` valida transporte y autenticación, no la ejecución completa de `thread/goal/*`. La CI de Windows usa mocks y no sustituye un smoke autenticado de Desktop. Antes de publicar debe repetirse, con cuota disponible, un smoke autenticado que confirme la exposición y ejecución end-to-end de la herramienta Goal nativa `update_goal`; la suite actual valida el protocolo y sus eventos con mocks. La versión `0.1.0` es privada y no está preparada para publicación npm.
+Las operaciones Goal requieren `experimentalApi` del App Server y pueden cambiar entre versiones de Desktop. `doctor` valida transporte y autenticación, no la ejecución completa de `thread/goal/*`. La CI multiplataforma usa mocks y empaqueta la interfaz, pero no sustituye un smoke autenticado de Desktop. Antes de publicar debe repetirse, con cuota disponible, un smoke autenticado que confirme la exposición y ejecución end-to-end de la herramienta Goal nativa `update_goal`. La versión `0.2.0` es privada y no está preparada para publicación npm.
 
 ## Desarrollo
 
-```powershell
+```sh
 npm run check
 ```
 
-La suite cubre activación Goal sin `turn/start`, eventos de `update_goal`, orden terminal/turno, políticas del thread, rechazos, estado atómico, locks, verificación, reparación, bloqueo y reconciliación tras crash. Consulta [SECURITY.md](SECURITY.md) antes de ampliar permisos.
+Empaquetado para el sistema anfitrión:
+
+```sh
+npm run desktop:package
+npm run desktop:make
+```
+
+`desktop:package` crea la aplicación desempaquetada. `desktop:make` genera Squirrel en Windows, ZIP en macOS y paquetes DEB/RPM en Linux dentro de `out/`; no realiza compilación cruzada.
+
+La suite cubre activación Goal sin `turn/start`, eventos de `update_goal`, orden terminal/turno, políticas del thread, rechazos, estado atómico, locks, verificación, reparación, bloqueo y reconciliación tras crash. La CI genera los instaladores y arranca la aplicación empaquetada en Windows x64, macOS ARM64 y Linux x64/arm64. Consulta [SECURITY.md](SECURITY.md) antes de ampliar permisos.
 
 Protocolo: [Codex App Server](https://learn.chatgpt.com/docs/app-server). Goals durables: [Long-running work](https://learn.chatgpt.com/docs/long-running-work).

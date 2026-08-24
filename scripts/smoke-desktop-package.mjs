@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { access, mkdtemp, rm } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -8,12 +9,18 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const packageRoot = path.join(root, 'out', `Codex Infinite-${process.platform}-${process.arch}`);
+const require = createRequire(import.meta.url);
+const { packagerConfig } = require('../forge.config.cjs');
+const { executableName, name: packageName } = packagerConfig;
+if (!/^[A-Za-z0-9._-]+$/u.test(packageName) || !/^[A-Za-z0-9._-]+$/u.test(executableName)) {
+  throw new Error('Los nombres tecnicos del paquete deben ser segmentos de ruta sin espacios.');
+}
+const packageRoot = path.join(root, 'out', `${packageName}-${process.platform}-${process.arch}`);
 const executablePath = process.platform === 'win32'
-  ? path.join(packageRoot, 'CodexInfinite.exe')
+  ? path.join(packageRoot, `${executableName}.exe`)
   : process.platform === 'darwin'
-    ? path.join(packageRoot, 'Codex Infinite.app', 'Contents', 'MacOS', 'CodexInfinite')
-    : path.join(packageRoot, 'CodexInfinite');
+    ? path.join(packageRoot, `${packageName}.app`, 'Contents', 'MacOS', executableName)
+    : path.join(packageRoot, executableName);
 
 await access(executablePath);
 const userDataDirectory = await mkdtemp(path.join(os.tmpdir(), 'codex-infinite-smoke-'));

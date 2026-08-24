@@ -1,4 +1,5 @@
 import { access } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listPackage } from '@electron/asar';
@@ -10,16 +11,20 @@ import {
 } from '@electron/fuses';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const packageRoot = path.join(root, 'out', `Codex Infinite-${process.platform}-${process.arch}`);
+const require = createRequire(import.meta.url);
+const { packagerConfig } = require('../forge.config.cjs');
+const { executableName, name: packageName } = packagerConfig;
+if (!/^[A-Za-z0-9._-]+$/u.test(packageName) || !/^[A-Za-z0-9._-]+$/u.test(executableName)) {
+  throw new Error('Los nombres tecnicos del paquete deben ser segmentos de ruta sin espacios.');
+}
+const packageRoot = path.join(root, 'out', `${packageName}-${process.platform}-${process.arch}`);
+const appBundle = `${packageName}.app`;
 const resourcesRoot = process.platform === 'darwin'
-  ? path.join(packageRoot, 'Codex Infinite.app', 'Contents', 'Resources')
+  ? path.join(packageRoot, appBundle, 'Contents', 'Resources')
   : path.join(packageRoot, 'resources');
 const candidates = process.platform === 'darwin'
-  ? [
-    path.join(packageRoot, 'Codex Infinite.app', 'Contents', 'MacOS', 'CodexInfinite'),
-    path.join(packageRoot, 'Codex Infinite.app', 'Contents', 'MacOS', 'Codex Infinite'),
-  ]
-  : [path.join(packageRoot, process.platform === 'win32' ? 'CodexInfinite.exe' : 'CodexInfinite')];
+  ? [path.join(packageRoot, appBundle, 'Contents', 'MacOS', executableName)]
+  : [path.join(packageRoot, process.platform === 'win32' ? `${executableName}.exe` : executableName)];
 
 let executable = null;
 for (const candidate of candidates) {

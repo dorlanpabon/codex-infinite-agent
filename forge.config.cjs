@@ -17,7 +17,12 @@ module.exports = {
     appBundleId: 'com.dorlanpabon.codex-infinite',
     appCategoryType: 'public.app-category.developer-tools',
     executableName: 'CodexInfinite',
-    name: 'Codex Infinite',
+    name: 'CodexInfinite',
+    win32metadata: {
+      CompanyName: 'dorlanpabon',
+      FileDescription: description,
+      ProductName: 'Codex Infinite',
+    },
     ignore: [
       /^\/out(?:\/|$)/,
       /^\/(?:src|test|scripts|\.github)(?:\/|$)/,
@@ -38,6 +43,7 @@ module.exports = {
         authors: 'dorlanpabon',
         description,
         setupExe: `Codex-Infinite-${version}-Setup.exe`,
+        title: 'Codex Infinite',
       },
     },
     { name: '@electron-forge/maker-zip', platforms: ['darwin'] },

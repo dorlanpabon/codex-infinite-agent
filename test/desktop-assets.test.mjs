@@ -33,6 +33,9 @@ test('desktop package uses a strict application allowlist', () => {
   const { makers, packagerConfig } = require('../forge.config.cjs');
   const isIgnored = (candidate) => packagerConfig.ignore.some((pattern) => pattern.test(candidate));
 
+  assert.match(packagerConfig.name, /^[A-Za-z0-9._-]+$/u);
+  assert.equal(packagerConfig.name, packagerConfig.executableName);
+  assert.equal(packagerConfig.win32metadata.ProductName, 'Codex Infinite');
   assert.equal(isIgnored('/dist/desktop/main.js'), false);
   assert.equal(isIgnored('/node_modules/electron-squirrel-startup/index.js'), false);
   assert.equal(isIgnored('/node_modules/debug/src/index.js'), false);
@@ -46,6 +49,9 @@ test('desktop package uses a strict application allowlist', () => {
     process.platform !== 'win32',
   );
   const linuxMakers = makers.filter((maker) => maker.platforms?.includes('linux'));
+  const windowsMaker = makers.find((maker) => maker.platforms?.includes('win32'));
+  assert.ok(windowsMaker);
+  assert.equal(windowsMaker.config.title, 'Codex Infinite');
   assert.equal(linuxMakers.length, 2);
   assert.equal(linuxMakers.every((maker) => maker.config.options.bin === packagerConfig.executableName), true);
 });

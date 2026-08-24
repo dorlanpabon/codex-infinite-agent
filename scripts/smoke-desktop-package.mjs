@@ -115,7 +115,12 @@ try {
 } finally {
   await browser?.close().catch(() => undefined);
   await stopDesktop(desktop);
-  await rm(userDataDirectory, { recursive: true, force: true });
+  await rm(userDataDirectory, {
+    recursive: true,
+    force: true,
+    maxRetries: process.platform === 'win32' ? 20 : 0,
+    retryDelay: 250,
+  });
 }
 
 process.stdout.write(`Smoke de escritorio correcto: ${process.platform}/${process.arch}\n`);

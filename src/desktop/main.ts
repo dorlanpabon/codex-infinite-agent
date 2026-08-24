@@ -14,10 +14,11 @@ import {
 import squirrelStartup from 'electron-squirrel-startup';
 import { errorMessage } from '../errors.js';
 import { sanitizeLog, type Logger } from '../log.js';
-import { doctorDesktop, listDesktopThreads } from '../operations.js';
+import { doctorDesktop, listDesktopSessions, listDesktopThreads } from '../operations.js';
 import { listRuns, loadRun } from '../state.js';
 import {
   DESKTOP_ORIGIN,
+  parseAttachRunInput,
   parseDoctorInput,
   parseResumeRunInput,
   parseRunId,
@@ -36,9 +37,11 @@ const CHANNELS = {
   listRuns: 'runs:list',
   getRun: 'runs:get',
   startRun: 'runs:start',
+  attachRun: 'runs:attach',
   resumeRun: 'runs:resume',
   pauseRun: 'runs:pause',
   listThreads: 'threads:list',
+  listSessions: 'sessions:list',
   event: 'runs:event',
 } as const;
 
@@ -123,6 +126,10 @@ function registerHandlers(): void {
     assertTrustedSender(event);
     return runManager.start(parseStartRunInput(raw));
   });
+  ipcMain.handle(CHANNELS.attachRun, (event, raw: unknown) => {
+    assertTrustedSender(event);
+    return runManager.attach(parseAttachRunInput(raw));
+  });
   ipcMain.handle(CHANNELS.resumeRun, (event, raw: unknown) => {
     assertTrustedSender(event);
     return runManager.resume(parseResumeRunInput(raw));
@@ -135,6 +142,17 @@ function registerHandlers(): void {
     assertTrustedSender(event);
     const input = parseThreadsInput(raw);
     return listDesktopThreads(input.workspace, input.limit, input.binary, ipcLogger('threads'));
+  });
+  ipcMain.handle(CHANNELS.listSessions, async (event, raw: unknown) => {
+    assertTrustedSender(event);
+    const input = parseThreadsInput(raw);
+    return listDesktopSessions(
+      input.workspace,
+      input.limit,
+      input.binary,
+      ipcLogger('sessions'),
+      runManager.activeRunIds,
+    );
   });
 }
 

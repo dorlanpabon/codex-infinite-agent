@@ -1,6 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
-import { CodexDesktopClient, type ThreadInfo } from './app-server/client.js';
+import { CodexDesktopClient, type GoalInfo, type ThreadInfo } from './app-server/client.js';
 import { discoverCodexBinary, type BinaryInfo } from './app-server/binary.js';
 import { JsonRpcProcess } from './app-server/rpc.js';
 import { AppError, errorMessage } from './errors.js';
@@ -10,11 +10,13 @@ import {
   acquireWorkspaceLock,
   createRunState,
   loadRun,
+  listRuns,
   saveRun,
   type RunState,
   type WorkspaceLock,
 } from './state.js';
 import { supervise } from './supervisor.js';
+import type { DesktopSessionInfo } from './desktop/contracts.js';
 
 const EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'ultra']);
 
@@ -41,6 +43,10 @@ export interface ResumeGoalOptions {
   network?: boolean;
   dangerFullAccess?: boolean;
   binary?: string | null;
+}
+
+export interface AttachGoalOptions extends StartGoalOptions {
+  threadId: string;
 }
 
 export interface OperationHooks {
@@ -80,6 +86,15 @@ function positiveNumber(value: number | undefined, fallback: number, name: strin
 
 function normalizedPath(value: string): string {
   return process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+}
+
+function attachableThread(thread: ThreadInfo): boolean {
+  return !thread.ephemeral && typeof thread.source === 'string'
+    && new Set(['cli', 'vscode', 'appServer', 'codex_desktop_infinite_agent']).has(thread.source);
+}
+
+function attachableGoal(goal: GoalInfo | null): goal is GoalInfo & { status: 'paused' } {
+  return goal !== null && goal.status === 'paused';
 }
 
 function validateVerificationCommands(commands: string[]): string[] {
@@ -218,6 +233,131 @@ export async function startGoal(
   return finalState!;
 }
 
+export async function attachGoal(
+  options: AttachGoalOptions,
+  signal: AbortSignal,
+  logger: Logger,
+  hooks?: OperationHooks,
+): Promise<RunState> {
+  const requestedObjective = options.objective.trim();
+  if (!requestedObjective || requestedObjective.length > 4000) {
+    throw new AppError('INVALID_OBJECTIVE', 'El objetivo debe tener entre 1 y 4000 caracteres.');
+  }
+  if (!options.threadId || options.threadId.length > 128) throw new AppError('INVALID_ARGUMENT', 'Thread ID invalido.');
+  if (options.model && options.model.length > 256) throw new AppError('INVALID_ARGUMENT', 'El modelo no puede exceder 256 caracteres.');
+  if (options.effort && !EFFORTS.has(options.effort)) throw new AppError('INVALID_ARGUMENT', 'Nivel de esfuerzo invalido.');
+
+  const requestedWorkspace = path.resolve(options.directory);
+  const { client } = await openClient(requestedWorkspace, options.binary, logger);
+  let state: RunState | null = null;
+  let lock: WorkspaceLock | null = null;
+  let finalState: RunState | null = null;
+  let runError: unknown = null;
+  let supervisionStarted = false;
+  try {
+    const thread = await client.readThread(options.threadId);
+    if (!attachableThread(thread)) throw new AppError('THREAD_NOT_ATTACHABLE', 'Esta sesion no es un thread interactivo persistido que pueda administrarse.');
+    if (normalizedPath(thread.cwd) !== normalizedPath(requestedWorkspace)) {
+      throw new AppError('WORKSPACE_MISMATCH', 'La sesion pertenece a otro workspace.');
+    }
+    if ((await listRuns()).some((run) => run.threadId === thread.id)) {
+      throw new AppError('RUN_ALREADY_EXISTS', 'Esta sesion ya tiene una ejecucion local; reanudala desde su historial.');
+    }
+
+    const remoteGoal = await client.getGoal(thread.id);
+    if (!attachableGoal(remoteGoal)) {
+      throw new AppError(
+        'GOAL_NOT_ATTACHABLE',
+        remoteGoal === null
+          ? 'La sesion no tiene un Goal pausado preexistente; no se creara uno sin una operacion atomica.'
+          : `El Goal remoto esta ${remoteGoal.status} y no se reemplazara.`,
+      );
+    }
+    const baseline = await resolveGitWorkspace(thread.cwd, 120_000, signal);
+    const dangerFullAccess = options.dangerFullAccess === true;
+    const objective = remoteGoal.objective;
+    const name = options.name?.trim() || thread.name?.trim() || `Infinite: ${objective.replace(/\s+/g, ' ').slice(0, 72)}`;
+    if (name.length > 128) throw new AppError('INVALID_ARGUMENT', 'El nombre no puede exceder 128 caracteres.');
+    const requestedTurns = positiveNumber(options.maxTurns, 30, 'maxTurns', true, 1000);
+    const requestedTokenBudget = remoteGoal.tokenBudget ?? options.tokenBudget ?? null;
+    if (requestedTokenBudget !== null) positiveNumber(requestedTokenBudget, 0, 'tokenBudget', true, 2_000_000_000);
+
+    state = createRunState({
+      workspace: baseline.root,
+      objective,
+      name,
+      maxTurns: requestedTurns,
+      turnTimeoutMs: positiveNumber(options.turnMinutes, 45, 'turnMinutes', false, 1440) * 60_000,
+      maxWallTimeMs: positiveNumber(options.maxHours, 8, 'maxHours', false, 720) * 60 * 60_000,
+      tokenBudget: requestedTokenBudget,
+      network: options.network === true || dangerFullAccess,
+      dangerFullAccess,
+      verifyCommands: validateVerificationCommands(options.verifyCommands ?? []),
+      model: options.model ?? null,
+      effort: options.effort ?? null,
+      gitBaseline: baseline,
+    });
+    state.threadId = thread.id;
+    state.nativeGoalStatus = remoteGoal.status;
+    state.nativeGoalCreatedAt = remoteGoal.createdAt;
+    state.goalTokenBudget = remoteGoal.tokenBudget;
+    state.totalTokens = remoteGoal.tokensUsed;
+    lock = await acquireWorkspaceLock(state.workspace, state.runId);
+    await saveRun(state);
+    notify(hooks, state, logger);
+
+    const resumed = await client.resumeThread(thread.id, state.workspace, state.model ?? undefined);
+    if (resumed.status.type === 'active') {
+      logger.info('La sesion tiene un turno activo; el modo continuo esperara su finalizacion sin enviar mensajes.');
+      await client.waitForThreadIdle(
+        thread.id,
+        Math.max(1, state.maxWallTimeMs - (Date.now() - Date.parse(state.startedAt))),
+        signal,
+      );
+    } else if (resumed.status.type !== 'idle') {
+      throw new AppError('REMOTE_STATE_UNCERTAIN', 'La sesion no alcanzo un estado seguro para activar el modo continuo.');
+    }
+    if (signal.aborted) throw new AppError('INTERRUPTED', 'Activacion interrumpida antes de modificar el Goal.', 130);
+
+    const currentGoal = await client.getGoal(thread.id);
+    if (!currentGoal || currentGoal.createdAt !== remoteGoal.createdAt
+      || currentGoal.objective !== remoteGoal.objective || currentGoal.status !== 'paused') {
+      throw new AppError('GOAL_OWNERSHIP_MISMATCH', 'El Goal cambio mientras se esperaba el turno activo; no se modificara.');
+    }
+
+    const priorTurns = await client.listTurns(thread.id, 1001);
+    if (priorTurns.length + requestedTurns > 1000) {
+      throw new AppError('GOAL_BUDGET_EXHAUSTED', 'La sesion tiene demasiados turnos previos para reservar el limite solicitado.');
+    }
+    state.observedTurnIds = priorTurns.map((turn) => turn.turnId);
+    state.acknowledgedBlockingTurnIds = [...state.observedTurnIds];
+    state.turnCount = state.observedTurnIds.length;
+    state.maxTurns = state.turnCount + requestedTurns;
+
+    await saveRun(state);
+    notify(hooks, state, logger);
+    supervisionStarted = true;
+    finalState = await supervise(client, state, logger, { resume: true, adopting: true, signal });
+    notify(hooks, finalState, logger);
+  } catch (error) {
+    runError = error;
+    if (!supervisionStarted) client.releaseThreadOwnership(options.threadId);
+    if (state) {
+      state.status = signal.aborted ? 'paused' : 'failed';
+      state.completedAt = signal.aborted ? null : new Date().toISOString();
+      state.lastError = sanitizeLog(errorMessage(error), 4000);
+      await saveRun(state).catch(() => undefined);
+      notify(hooks, state, logger);
+    }
+    if (signal.aborted && state) return state;
+    throw error;
+  } finally {
+    if (state && lock) await cleanupManagedRun({ client, hooks, lock, logger, runError, state });
+    else await client.close().catch(() => undefined);
+  }
+  return finalState!;
+}
+
 export async function resumeGoal(
   options: ResumeGoalOptions,
   signal: AbortSignal,
@@ -265,6 +405,67 @@ export async function listDesktopThreads(
   const { client } = await openClient(cwd, explicitBinary, logger);
   try {
     return await client.listThreads(workspace ? cwd : undefined, positiveNumber(limit, 50, 'limit', true, 100));
+  } finally {
+    await client.close();
+  }
+}
+
+export async function listDesktopSessions(
+  workspace: string | null,
+  limit: number,
+  explicitBinary: string | null,
+  logger: Logger,
+  activeRunIds: ReadonlySet<string> = new Set(),
+): Promise<DesktopSessionInfo[]> {
+  const cwd = path.resolve(workspace ?? os.homedir());
+  const { client } = await openClient(cwd, explicitBinary, logger);
+  try {
+    const [threads, runs] = await Promise.all([
+      client.listThreads(workspace ? cwd : undefined, positiveNumber(limit, 50, 'limit', true, 100)),
+      listRuns(),
+    ]);
+    const runByThread = new Map(runs.filter((run) => run.threadId).map((run) => [run.threadId!, run]));
+    const activeWorkspace = new Map(runs
+      .filter((run) => activeRunIds.has(run.runId))
+      .map((run) => [normalizedPath(run.workspace), run.runId]));
+
+    return await Promise.all(threads.map(async (thread): Promise<DesktopSessionInfo> => {
+      let goal: GoalInfo | null = null;
+      let goalError: string | null = null;
+      try {
+        goal = await client.getGoal(thread.id);
+      } catch (error) {
+        goalError = sanitizeLog(errorMessage(error), 1000);
+      }
+      const localRun = runByThread.get(thread.id) ?? null;
+      const operationActive = localRun !== null && activeRunIds.has(localRun.runId);
+      const workspaceOwner = activeWorkspace.get(normalizedPath(thread.cwd));
+      let unavailableReason: string | null = null;
+      if (goalError) unavailableReason = 'No se pudo confirmar el Goal remoto.';
+      else if (!attachableThread(thread)) unavailableReason = 'Solo se pueden administrar sesiones interactivas persistidas.';
+      else if (workspaceOwner && workspaceOwner !== localRun?.runId) unavailableReason = 'Otro objetivo ya administra este workspace.';
+      else if (!localRun && !attachableGoal(goal)) {
+        unavailableReason = goal === null
+          ? 'La sesion necesita un Goal pausado preexistente.'
+          : goal.status === 'active'
+          ? 'Este Goal esta activo fuera de esta instancia.'
+          : `El Goal remoto esta ${goal.status}.`;
+      } else if (localRun?.status === 'completed') unavailableReason = 'La ejecucion local ya esta completa.';
+
+      const canDisable = operationActive;
+      const canEnable = !operationActive && unavailableReason === null
+        && (localRun !== null || attachableGoal(goal));
+      return {
+        thread,
+        goal,
+        goalError,
+        localRun,
+        operationActive,
+        canEnable,
+        canDisable,
+        unavailableReason,
+      };
+    }));
   } finally {
     await client.close();
   }

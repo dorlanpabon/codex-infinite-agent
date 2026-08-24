@@ -8,10 +8,11 @@ const root = path.resolve(import.meta.dirname, '..');
 const require = createRequire(import.meta.url);
 
 test('desktop renderer modules and preload are included in the local protocol build', async () => {
-  const [main, renderer, html] = await Promise.all([
+  const [main, renderer, html, css] = await Promise.all([
     readFile(path.join(root, 'dist', 'desktop', 'main.js'), 'utf8'),
     readFile(path.join(root, 'dist', 'desktop', 'renderer', 'app.js'), 'utf8'),
     readFile(path.join(root, 'dist', 'desktop', 'renderer', 'index.html'), 'utf8'),
+    readFile(path.join(root, 'dist', 'desktop', 'renderer', 'app.css'), 'utf8'),
     access(path.join(root, 'dist', 'desktop', 'preload.cjs')),
   ]);
   const imports = [...renderer.matchAll(/\bfrom\s+['"](\.[^'"]+)['"]/gu)].map((match) => match[1]);
@@ -22,6 +23,21 @@ test('desktop renderer modules and preload are included in the local protocol bu
   }
   assert.match(html, /frame-src 'none'; worker-src 'none'/u);
   assert.match(html, /id="resume-dialog"/u);
+  assert.match(html, /id="sessions-tab"/u);
+  assert.match(html, /id="sessions-panel"/u);
+  assert.match(html, /id="goal-thread"/u);
+  assert.match(renderer, /setAttribute\('role', 'switch'\)/u);
+  assert.match(renderer, /setAttribute\('aria-describedby', state\.id\)/u);
+  assert.match(renderer, /pendingSwitchFocusThreadId/u);
+  assert.match(renderer, /sessionsPanel\.setAttribute\('aria-busy', 'true'\)/u);
+  assert.match(renderer, /api\.listSessions/u);
+  assert.match(renderer, /sessionsRefreshInFlight/u);
+  assert.match(renderer, /generation !== sessionsRefreshGeneration/u);
+  assert.match(renderer, /active: 'Activa'/u);
+  assert.doesNotMatch(renderer, /Tareas Desktop/u);
+  assert.match(css, /\.session-switch\s*\{[^}]*width:\s*44px;[^}]*height:\s*44px;/su);
+  assert.match(html, /id="sessions-panel"[^>]*aria-busy="false"/u);
+  assert.match(html, /id="thread-list"[^>]*aria-busy="false"/u);
   assert.doesNotMatch(renderer, /\.innerHTML\b/u);
   assert.doesNotMatch(renderer, /verifyCommands:\s*run\.verifyCommands/u);
   assert.doesNotMatch(renderer, /network:\s*run\.network/u);

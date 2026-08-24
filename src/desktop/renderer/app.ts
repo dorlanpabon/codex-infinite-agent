@@ -1,7 +1,9 @@
 import {
   EFFORTS,
+  type AttachRunInput,
   type DesktopApi,
   type DesktopEvent,
+  type DesktopSessionInfo,
   type DoctorResult,
   type Effort,
   type LogLevel,
@@ -9,7 +11,6 @@ import {
 } from '../contracts.js';
 
 type RunState = Awaited<ReturnType<DesktopApi['listRuns']>>[number];
-type ThreadInfo = Awaited<ReturnType<DesktopApi['listThreads']>>[number];
 type RunStatus = RunState['status'];
 
 interface SessionLog {
@@ -37,10 +38,13 @@ const ui = {
   dangerFullAccess: element<HTMLInputElement>('goal-full-access'),
   dialogCancelButton: element<HTMLButtonElement>('dialog-cancel-button'),
   dialogCloseButton: element<HTMLButtonElement>('dialog-close-button'),
+  dialogDescription: element<HTMLElement>('goal-dialog-description'),
   dialogDoctorButton: element<HTMLButtonElement>('dialog-doctor-button'),
   dialogDoctorDetail: element<HTMLElement>('dialog-doctor-detail'),
   dialogDoctorDot: element<HTMLSpanElement>('dialog-doctor-dot'),
   dialogDoctorLabel: element<HTMLElement>('dialog-doctor-label'),
+  dialogFooterCopy: element<HTMLElement>('dialog-footer-copy'),
+  dialogTitle: element<HTMLElement>('goal-dialog-title'),
   doctorButton: element<HTMLButtonElement>('doctor-button'),
   doctorDot: element<HTMLSpanElement>('doctor-dot'),
   doctorLabel: element<HTMLSpanElement>('doctor-label'),
@@ -105,6 +109,9 @@ const ui = {
   runThread: element<HTMLElement>('run-thread'),
   runUpdated: element<HTMLElement>('run-updated'),
   runWorkspace: element<HTMLElement>('run-workspace'),
+  sessionCount: element<HTMLElement>('session-count'),
+  sessionsPanel: element<HTMLElement>('sessions-panel'),
+  sessionsTab: element<HTMLButtonElement>('sessions-tab'),
   submitButton: element<HTMLButtonElement>('goal-submit-button'),
   systemVersion: element<HTMLElement>('system-version'),
   threadList: element<HTMLUListElement>('thread-list'),
@@ -116,6 +123,8 @@ const ui = {
   tokenCaption: element<HTMLElement>('token-caption'),
   turnMinutesInput: element<HTMLInputElement>('goal-turn-minutes'),
   turnProgress: element<HTMLProgressElement>('turn-progress'),
+  threadInput: element<HTMLInputElement>('goal-thread'),
+  threadRow: element<HTMLElement>('goal-thread-row'),
   verificationCaption: element<HTMLElement>('verification-caption'),
   verificationDate: element<HTMLElement>('verification-date'),
   verificationEmpty: element<HTMLElement>('verification-empty'),
@@ -146,6 +155,13 @@ const goalLabels: Record<NonNullable<RunState['nativeGoalStatus']>, string> = {
   complete: 'Goal completo',
 };
 
+const threadStatusLabels: Record<DesktopSessionInfo['thread']['status']['type'], string> = {
+  active: 'Activa',
+  idle: 'Inactiva',
+  notLoaded: 'No cargada',
+  systemError: 'Error',
+};
+
 const effortLabels: Record<Effort, string> = {
   minimal: 'Mínimo',
   low: 'Bajo',
@@ -170,12 +186,18 @@ const relativeFormatter = new Intl.RelativeTimeFormat('es', { numeric: 'auto' })
 let runs: RunState[] = [];
 let selectedRunId: string | null = null;
 let doctorResult: DoctorResult | null = null;
-let threads: ThreadInfo[] = [];
+let sessions: DesktopSessionInfo[] = [];
 let sessionLogs: SessionLog[] = [];
 let pollInFlight = false;
+let sessionsRefreshInFlight: Promise<void> | null = null;
+let sessionsReconcileAgain = false;
+let sessionsRefreshGeneration = 0;
+let sessionsPendingQuiet = true;
+let pendingSwitchFocusThreadId: string | null = null;
 let lastPollError: string | null = null;
 let chosenBinary: string | null = null;
 let resumeRunId: string | null = null;
+let attachSession: DesktopSessionInfo | null = null;
 const pendingOperations = new Map<string, string | null>();
 const settledOperations = new Set<string>();
 
@@ -509,44 +531,163 @@ async function runDoctor(showToast = true): Promise<void> {
   }
 }
 
+function sessionState(session: DesktopSessionInfo): string {
+  if (session.operationActive && session.goal?.status !== 'active' && session.thread.status.type === 'active') {
+    return 'Esperando que termine el turno actual';
+  }
+  if (session.operationActive) return session.localRun?.status === 'verifying' ? 'Verificando resultado' : 'Modo continuo activo';
+  if (session.goal?.status === 'active') return 'Goal activo en otra instancia';
+  if (session.localRun) return statusLabels[session.localRun.status];
+  if (session.goal) return goalLabels[session.goal.status];
+  return session.unavailableReason ?? 'Modo continuo desactivado';
+}
+
+async function toggleSession(session: DesktopSessionInfo): Promise<void> {
+  const checked = session.operationActive || session.goal?.status === 'active';
+  if (checked) {
+    if (!session.canDisable || !session.localRun) return;
+    try {
+      await api.pauseRun(session.localRun.runId);
+      announce('Pausa solicitada para la sesion.');
+    } catch (error) {
+      toast(errorText(error), true);
+    }
+    return;
+  }
+  if (!session.canEnable) return;
+  if (session.localRun) {
+    selectedRunId = session.localRun.runId;
+    render();
+    openResumeDialog();
+    return;
+  }
+  openGoalDialog(session);
+}
+
 function renderThreads(): void {
+  const activeElement = document.activeElement;
+  const focusedSwitchThreadId = activeElement instanceof HTMLButtonElement
+    && activeElement.classList.contains('session-switch')
+    ? activeElement.dataset.threadId ?? null
+    : null;
+  const focusedStateThreadId = activeElement instanceof HTMLElement
+    && activeElement.classList.contains('session-state')
+    ? activeElement.dataset.threadId ?? null
+    : null;
+  if (pendingSwitchFocusThreadId && focusedStateThreadId !== pendingSwitchFocusThreadId) {
+    pendingSwitchFocusThreadId = null;
+  }
+  const focusedThreadId = focusedSwitchThreadId ?? focusedStateThreadId;
   const fragment = document.createDocumentFragment();
-  for (const thread of threads) {
+  for (const [index, session] of sessions.entries()) {
+    const { thread } = session;
     const item = document.createElement('li');
-    item.className = 'thread-item';
+    item.className = 'session-item';
+    const content = document.createElement('div');
     const title = document.createElement('strong');
-    title.textContent = thread.name || thread.preview || 'Tarea sin nombre';
+    title.className = 'session-title';
+    title.textContent = thread.name || thread.preview || 'Sesión sin nombre';
     const meta = document.createElement('span');
-    meta.textContent = `${thread.status.type} · ${thread.cwd}`;
-    item.append(title, meta);
+    meta.className = 'session-meta';
+    meta.textContent = `${threadStatusLabels[thread.status.type]} · ${thread.cwd}`;
+    const state = document.createElement('span');
+    state.className = 'session-state';
+    state.id = `session-state-${index}`;
+    state.dataset.threadId = thread.id;
+    state.tabIndex = -1;
+    const toggle = document.createElement('button');
+    const checked = session.operationActive || session.goal?.status === 'active';
+    toggle.type = 'button';
+    toggle.className = 'session-switch';
+    toggle.dataset.threadId = thread.id;
+    toggle.setAttribute('role', 'switch');
+    toggle.setAttribute('aria-checked', String(checked));
+    toggle.setAttribute('aria-label', `${checked ? 'Desactivar' : 'Activar'} modo continuo para ${title.textContent}`);
+    toggle.disabled = checked ? !session.canDisable : !session.canEnable;
+    state.textContent = toggle.disabled
+      ? session.unavailableReason ?? sessionState(session)
+      : sessionState(session);
+    toggle.title = state.textContent;
+    if (toggle.disabled) {
+      toggle.setAttribute('aria-disabled', 'true');
+      toggle.setAttribute('aria-describedby', state.id);
+    }
+    toggle.addEventListener('click', () => { void toggleSession(session); });
+    content.append(title, meta, state);
+    item.append(content, toggle);
     fragment.append(item);
   }
   ui.threadList.replaceChildren(fragment);
-  ui.threadsEmpty.hidden = threads.length > 0;
-  if (threads.length === 0) ui.threadsEmpty.textContent = 'No hay tareas recientes visibles.';
+  if (focusedThreadId) {
+    const focusedSwitch = [...ui.threadList.querySelectorAll<HTMLButtonElement>('.session-switch')]
+      .find((candidate) => candidate.dataset.threadId === focusedThreadId);
+    const focusedState = [...ui.threadList.querySelectorAll<HTMLElement>('.session-state')]
+      .find((candidate) => candidate.dataset.threadId === focusedThreadId);
+    if (focusedSwitch && !focusedSwitch.disabled) {
+      focusedSwitch.focus({ preventScroll: true });
+      pendingSwitchFocusThreadId = null;
+    } else if (focusedState) {
+      focusedState.focus({ preventScroll: true });
+      pendingSwitchFocusThreadId = focusedThreadId;
+    } else {
+      pendingSwitchFocusThreadId = null;
+    }
+  }
+  ui.sessionCount.textContent = String(sessions.length);
+  ui.threadsEmpty.hidden = sessions.length > 0;
+  if (sessions.length === 0) ui.threadsEmpty.textContent = 'No hay sesiones recientes visibles.';
 }
 
-async function refreshThreads(quiet = false): Promise<void> {
-  ui.threadsRefreshButton.disabled = true;
-  try {
-    threads = await api.listThreads({
-      workspace: selectedRun()?.workspace ?? (ui.workspaceInput.value.trim() || null),
-      binary: ui.binaryInput.value.trim() || chosenBinary,
-      limit: 6,
-    });
-    renderThreads();
-    if (!quiet) announce(`${threads.length} tareas de Desktop actualizadas.`);
-  } catch (error) {
-    const message = errorText(error);
-    threads = [];
-    ui.threadList.replaceChildren();
-    ui.threadsEmpty.hidden = false;
-    ui.threadsEmpty.textContent = 'No fue posible consultar las tareas.';
-    appendLog('warn', `Tareas Desktop: ${message}`);
-    if (!quiet) toast(message, true);
-  } finally {
-    ui.threadsRefreshButton.disabled = false;
+function refreshThreads(quiet = false): Promise<void> {
+  sessionsRefreshGeneration += 1;
+  sessionsPendingQuiet = sessionsRefreshInFlight === null ? quiet : sessionsPendingQuiet && quiet;
+  if (sessionsRefreshInFlight) {
+    sessionsReconcileAgain = true;
+    return sessionsRefreshInFlight;
   }
+
+  const reconcile = async (): Promise<void> => {
+    ui.threadsRefreshButton.disabled = true;
+    ui.sessionsPanel.setAttribute('aria-busy', 'true');
+    ui.threadList.setAttribute('aria-busy', 'true');
+    try {
+      do {
+        sessionsReconcileAgain = false;
+        const generation = sessionsRefreshGeneration;
+        try {
+          const nextSessions = await api.listSessions({
+            workspace: null,
+            binary: ui.binaryInput.value.trim() || chosenBinary,
+            limit: 50,
+          });
+          if (generation !== sessionsRefreshGeneration) continue;
+          sessions = nextSessions;
+          renderThreads();
+          if (!sessionsPendingQuiet) announce(`${sessions.length} sesiones de Desktop actualizadas.`);
+          sessionsPendingQuiet = true;
+        } catch (error) {
+          if (generation !== sessionsRefreshGeneration) continue;
+          const message = errorText(error);
+          sessions = [];
+          ui.threadList.replaceChildren();
+          ui.sessionCount.textContent = '0';
+          ui.threadsEmpty.hidden = false;
+          ui.threadsEmpty.textContent = 'No fue posible consultar las sesiones.';
+          appendLog('warn', `Sesiones Desktop: ${message}`);
+          if (!sessionsPendingQuiet) toast(message, true);
+          sessionsPendingQuiet = true;
+        }
+      } while (sessionsReconcileAgain);
+    } finally {
+      sessionsRefreshInFlight = null;
+      ui.threadsRefreshButton.disabled = false;
+      ui.sessionsPanel.setAttribute('aria-busy', 'false');
+      ui.threadList.setAttribute('aria-busy', 'false');
+    }
+  };
+
+  sessionsRefreshInFlight = Promise.resolve().then(reconcile);
+  return sessionsRefreshInFlight;
 }
 
 function populateEfforts(): void {
@@ -563,13 +704,30 @@ function setFormError(message: string | null): void {
   ui.formError.textContent = message ?? '';
 }
 
-function openGoalDialog(): void {
-  const workspace = selectedRun()?.workspace ?? ui.workspaceInput.value;
+function openGoalDialog(session: DesktopSessionInfo | null = null): void {
+  attachSession = session;
+  const workspace = session?.thread.cwd ?? selectedRun()?.workspace ?? ui.workspaceInput.value;
   const binary = ui.binaryInput.value || chosenBinary || '';
   ui.form.reset();
   ui.workspaceInput.value = workspace;
   ui.binaryInput.value = binary;
-  ui.objectiveCount.textContent = '0 / 4000';
+  ui.threadRow.hidden = session === null;
+  ui.threadInput.value = session?.thread.id ?? '';
+  ui.workspaceInput.readOnly = session !== null;
+  ui.workspacePickerButton.disabled = session !== null;
+  ui.objectiveInput.value = session?.goal?.objective ?? session?.thread.preview ?? '';
+  ui.objectiveInput.readOnly = session?.goal !== null && session?.goal !== undefined;
+  ui.nameInput.value = session?.thread.name ?? '';
+  if (session?.goal?.tokenBudget) ui.tokenBudgetInput.value = String(session.goal.tokenBudget);
+  ui.dialogTitle.textContent = session ? 'Activar modo continuo' : 'Nuevo objetivo';
+  ui.dialogDescription.textContent = session
+    ? 'La sesión se adjunta de forma segura. Si su turno está activo, esperará a que termine antes de activar el Goal.'
+    : 'Define el resultado, los límites y el workspace que Codex puede modificar.';
+  ui.dialogFooterCopy.textContent = session
+    ? 'No se enviarán mensajes mientras el turno actual siga activo.'
+    : 'La ejecución se guarda localmente y aparece en Codex Desktop.';
+  ui.submitButton.textContent = session ? 'Activar modo' : 'Iniciar objetivo';
+  ui.objectiveCount.textContent = `${ui.objectiveInput.value.length} / 4000`;
   ui.advancedSettings.open = false;
   updateDangerConfirmation();
   setFormError(null);
@@ -579,6 +737,12 @@ function openGoalDialog(): void {
 
 function closeGoalDialog(): void {
   if (ui.goalDialog.open) ui.goalDialog.close();
+  attachSession = null;
+  ui.threadRow.hidden = true;
+  ui.threadInput.value = '';
+  ui.workspaceInput.readOnly = false;
+  ui.workspacePickerButton.disabled = false;
+  ui.objectiveInput.readOnly = false;
 }
 
 function updateDangerConfirmation(): void {
@@ -636,10 +800,13 @@ async function submitGoal(event: SubmitEvent): Promise<void> {
     return;
   }
   ui.submitButton.disabled = true;
-  ui.submitButton.textContent = 'Iniciando…';
+  ui.submitButton.textContent = attachSession ? 'Activando…' : 'Iniciando…';
   try {
     const input = startInput();
-    const receipt = await api.startRun(input);
+    const attachInput: AttachRunInput | null = attachSession
+      ? { ...input, threadId: attachSession.thread.id }
+      : null;
+    const receipt = attachInput ? await api.attachRun(attachInput) : await api.startRun(input);
     if (!pendingOperations.has(receipt.operationId) && !settledOperations.has(receipt.operationId)) {
       pendingOperations.set(receipt.operationId, null);
     }
@@ -655,7 +822,7 @@ async function submitGoal(event: SubmitEvent): Promise<void> {
     appendLog('error', `Inicio: ${message}`);
   } finally {
     ui.submitButton.disabled = false;
-    ui.submitButton.textContent = 'Iniciar objetivo';
+    ui.submitButton.textContent = attachSession ? 'Activar modo' : 'Iniciar objetivo';
   }
 }
 
@@ -797,6 +964,7 @@ function handleDesktopEvent(event: DesktopEvent): void {
       pendingOperations.set(event.operationId, event.run.runId);
       upsertRun(event.run);
       render();
+      void refreshThreads(true);
       break;
     case 'operation-finished':
       pendingOperations.delete(event.operationId);
@@ -806,6 +974,7 @@ function handleDesktopEvent(event: DesktopEvent): void {
       toast(`${event.run.name}: ${statusLabels[event.run.status].toLowerCase()}.`);
       announce(`Ejecución ${statusLabels[event.run.status].toLowerCase()}.`);
       render();
+      void refreshThreads(true);
       break;
     case 'operation-error':
       pendingOperations.delete(event.operationId);
@@ -814,6 +983,7 @@ function handleDesktopEvent(event: DesktopEvent): void {
       toast(event.error.message, true);
       announce('La operación terminó con un error.');
       renderSelectedRun();
+      void refreshThreads(true);
       break;
     case 'log':
       appendLog(event.level, event.message, event.timestamp);
@@ -821,29 +991,47 @@ function handleDesktopEvent(event: DesktopEvent): void {
   }
 }
 
-function setActiveTab(tab: 'inspector' | 'logs', focus = false): void {
+type PanelTab = 'inspector' | 'sessions' | 'logs';
+
+function setActiveTab(tab: PanelTab, focus = false): void {
   const inspectorActive = tab === 'inspector';
+  const sessionsActive = tab === 'sessions';
+  const logsActive = tab === 'logs';
   ui.inspectorTab.classList.toggle('is-active', inspectorActive);
-  ui.logsTab.classList.toggle('is-active', !inspectorActive);
+  ui.sessionsTab.classList.toggle('is-active', sessionsActive);
+  ui.logsTab.classList.toggle('is-active', logsActive);
   ui.inspectorTab.setAttribute('aria-selected', String(inspectorActive));
-  ui.logsTab.setAttribute('aria-selected', String(!inspectorActive));
+  ui.sessionsTab.setAttribute('aria-selected', String(sessionsActive));
+  ui.logsTab.setAttribute('aria-selected', String(logsActive));
   ui.inspectorTab.tabIndex = inspectorActive ? 0 : -1;
-  ui.logsTab.tabIndex = inspectorActive ? -1 : 0;
+  ui.sessionsTab.tabIndex = sessionsActive ? 0 : -1;
+  ui.logsTab.tabIndex = logsActive ? 0 : -1;
   ui.inspectorPanel.hidden = !inspectorActive;
-  ui.logsPanel.hidden = inspectorActive;
-  if (focus) (inspectorActive ? ui.inspectorTab : ui.logsTab).focus();
+  ui.sessionsPanel.hidden = !sessionsActive;
+  ui.logsPanel.hidden = !logsActive;
+  const activeButton = inspectorActive ? ui.inspectorTab : sessionsActive ? ui.sessionsTab : ui.logsTab;
+  if (focus) activeButton.focus();
+  if (sessionsActive) void refreshThreads(true);
 }
 
 function handleTabKeydown(event: KeyboardEvent): void {
   if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' && event.key !== 'Home' && event.key !== 'End') return;
   event.preventDefault();
-  const inspector = event.key === 'ArrowLeft' || event.key === 'Home';
-  setActiveTab(inspector ? 'inspector' : 'logs', true);
+  const tabs: Array<{ button: HTMLButtonElement; tab: PanelTab }> = [
+    { button: ui.inspectorTab, tab: 'inspector' },
+    { button: ui.sessionsTab, tab: 'sessions' },
+    { button: ui.logsTab, tab: 'logs' },
+  ];
+  const current = Math.max(0, tabs.findIndex(({ button }) => button === document.activeElement));
+  const next = event.key === 'Home' ? 0
+    : event.key === 'End' ? tabs.length - 1
+      : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+  setActiveTab(tabs[next]!.tab, true);
 }
 
 function wireEvents(): () => void {
-  ui.newGoalButton.addEventListener('click', openGoalDialog);
-  ui.emptyNewGoalButton.addEventListener('click', openGoalDialog);
+  ui.newGoalButton.addEventListener('click', () => openGoalDialog());
+  ui.emptyNewGoalButton.addEventListener('click', () => openGoalDialog());
   ui.dialogCloseButton.addEventListener('click', closeGoalDialog);
   ui.dialogCancelButton.addEventListener('click', closeGoalDialog);
   ui.form.addEventListener('submit', (event) => { void submitGoal(event); });
@@ -864,8 +1052,10 @@ function wireEvents(): () => void {
   ui.pauseButton.addEventListener('click', () => { void pauseSelectedRun(); });
   ui.clearLogsButton.addEventListener('click', clearLogs);
   ui.inspectorTab.addEventListener('click', () => setActiveTab('inspector'));
+  ui.sessionsTab.addEventListener('click', () => setActiveTab('sessions'));
   ui.logsTab.addEventListener('click', () => setActiveTab('logs'));
   ui.inspectorTab.addEventListener('keydown', handleTabKeydown);
+  ui.sessionsTab.addEventListener('keydown', handleTabKeydown);
   ui.logsTab.addEventListener('keydown', handleTabKeydown);
   document.addEventListener('keydown', (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'n') {

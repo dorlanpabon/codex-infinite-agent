@@ -126,7 +126,7 @@
             </header>
             <dl class="detail-list">
               <div><dt>Workspace</dt><dd id="run-workspace">—</dd></div>
-              <div><dt>Thread de Desktop</dt><dd id="run-thread">Pendiente</dd></div>
+              <div><dt>Sesión de Desktop</dt><dd id="run-thread">Pendiente</dd></div>
               <div><dt>Último turno</dt><dd id="run-last-turn">Sin turnos</dd></div>
               <div><dt>Modelo</dt><dd id="run-model">Predeterminado</dd></div>
               <div><dt>Permisos</dt><dd id="run-permissions">Workspace protegido</dd></div>
@@ -150,6 +150,7 @@
       <aside class="inspector" aria-label="Inspector y registro">
         <div class="tabs" role="tablist" aria-label="Panel secundario">
           <button class="tab is-active" id="inspector-tab" type="button" role="tab" aria-selected="true" aria-controls="inspector-panel">Inspector</button>
+          <button class="tab" id="sessions-tab" type="button" role="tab" aria-selected="false" aria-controls="sessions-panel">Sesiones <span id="session-count">0</span></button>
           <button class="tab" id="logs-tab" type="button" role="tab" aria-selected="false" aria-controls="logs-panel">Registro <span id="log-count">0</span></button>
         </div>
 
@@ -167,7 +168,6 @@
           <div class="inspector-section">
             <div class="inspector-title-row">
               <span class="eyebrow">Codex Desktop</span>
-              <button class="text-button" id="threads-refresh-button" type="button">Actualizar</button>
             </div>
             <dl class="inspector-list">
               <div><dt>Cuenta</dt><dd id="inspect-account">Comprobando…</dd></div>
@@ -176,11 +176,19 @@
             </dl>
           </div>
 
-          <div class="inspector-section">
-            <span class="eyebrow">Tareas recientes de Desktop</span>
-            <p class="section-empty compact" id="threads-empty">No se han consultado tareas.</p>
-            <ul class="thread-list" id="thread-list"></ul>
+        </section>
+
+        <section class="tab-panel sessions-panel" id="sessions-panel" role="tabpanel" aria-labelledby="sessions-tab" aria-busy="false" hidden>
+          <div class="sessions-heading">
+            <div>
+              <span class="eyebrow">Codex Desktop</span>
+              <h2>Sesiones</h2>
+            </div>
+            <button class="text-button" id="threads-refresh-button" type="button">Actualizar</button>
           </div>
+          <p class="sessions-help">Activa el modo continuo en una sesión. Si hay un turno en curso, espera su finalización sin enviar mensajes.</p>
+          <p class="section-empty compact" id="threads-empty">No se han consultado sesiones.</p>
+          <ul class="thread-list session-list" id="thread-list" aria-busy="false"></ul>
         </section>
 
         <section class="tab-panel logs-panel" id="logs-panel" role="tabpanel" aria-labelledby="logs-tab" hidden>
@@ -217,6 +225,11 @@
           <div class="field">
             <label for="goal-name">Nombre visible</label>
             <input id="goal-name" name="name" type="text" maxlength="128" autocomplete="off" placeholder="Se genera a partir del objetivo">
+          </div>
+
+          <div class="field" id="goal-thread-row" hidden>
+            <label for="goal-thread">Sesión de Desktop</label>
+            <input id="goal-thread" name="threadId" type="text" readonly spellcheck="false">
           </div>
 
           <div class="field">
@@ -307,7 +320,7 @@
         </div>
 
         <footer class="dialog-footer">
-          <span>La ejecución se guarda localmente y aparece en Codex Desktop.</span>
+          <span id="dialog-footer-copy">La ejecución se guarda localmente y aparece en Codex Desktop.</span>
           <div>
             <button class="secondary-button" id="dialog-cancel-button" type="button">Cancelar</button>
             <button class="primary-button" id="goal-submit-button" type="submit">Iniciar objetivo</button>

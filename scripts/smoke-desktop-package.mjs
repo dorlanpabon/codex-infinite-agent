@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { access, mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import os from 'node:os';
@@ -49,6 +49,32 @@ try {
     { platform: process.platform, arch: process.arch },
   );
   assert.match(system.version, /^\d+\.\d+\.\d+/);
+  const qaDirectory = process.env.QA_SCREENSHOT_DIR || path.join(root, 'out', 'qa');
+  await mkdir(qaDirectory, { recursive: true });
+  const initialFit = await layoutSnapshot(window);
+  assert.equal(initialFit.canScrollX, false);
+  assert.equal(initialFit.canScrollY, false);
+  assert.equal(initialFit.regions.every((region) => region.visible && region.inViewport), true);
+  await window.screenshot({ path: path.join(qaDirectory, 'desktop-initial.png') });
+
+  await window.locator('#inspector-tab').focus();
+  await window.keyboard.press('ArrowRight');
+  assert.equal(await window.locator('#sessions-tab').getAttribute('aria-selected'), 'true');
+  assert.equal(await window.locator('#sessions-panel').isVisible(), true);
+  await window.locator('#sessions-panel').waitFor({ state: 'visible' });
+  await window.waitForFunction(() => document.querySelector('#sessions-panel')?.getAttribute('aria-busy') === 'false');
+  await window.screenshot({ path: path.join(qaDirectory, 'desktop-sessions.png') });
+  const attachableSession = window.locator('.session-switch:enabled').first();
+  if (await attachableSession.count() > 0) {
+    await attachableSession.click();
+    assert.equal(await window.locator('#goal-dialog').evaluate((dialog) => dialog.open), true);
+    assert.equal(await window.locator('#goal-thread-row').isVisible(), true);
+    assert.equal(await window.locator('#goal-dialog-title').innerText(), 'Activar modo continuo');
+    assert.match(await window.locator('#dialog-footer-copy').innerText(), /No se enviarán mensajes/iu);
+    await window.screenshot({ path: path.join(qaDirectory, 'desktop-attach-dialog.png') });
+    await window.locator('#dialog-close-button').click();
+  }
+
   await window.locator('#new-goal-button').click();
   assert.equal(await window.locator('#goal-dialog').evaluate((dialog) => dialog.open), true);
   assert.equal(await window.locator('#goal-network').isChecked(), false);
@@ -57,6 +83,35 @@ try {
   assert.equal(await window.locator('#resume-verify').inputValue(), '');
   assert.equal(await window.locator('#resume-network').isChecked(), false);
   assert.equal(await window.locator('#resume-full-access').isChecked(), false);
+
+  for (const viewport of [
+    { width: 1024, height: 768 },
+    { width: 760, height: 900 },
+    { width: 430, height: 932 },
+  ]) {
+    await window.setViewportSize(viewport);
+    await window.locator('.inspector').evaluate((element) => element.scrollIntoView({ block: 'start' }));
+    await window.locator('#sessions-tab').click();
+    const compactFit = await compactSessionsSnapshot(window);
+    assert.equal(compactFit.canScrollX, false);
+    assert.equal(
+      compactFit.regions.every((region) => region.visible && region.inViewport),
+      true,
+      JSON.stringify({ viewport, compactFit }),
+    );
+    await window.screenshot({
+      path: path.join(qaDirectory, `desktop-sessions-${viewport.width}.png`),
+    });
+  }
+
+  await window.locator('#new-goal-button').click();
+  const compactDialogFit = await window.locator('#goal-dialog').evaluate((dialog) => {
+    const rect = dialog.getBoundingClientRect();
+    return rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight;
+  });
+  assert.equal(compactDialogFit, true);
+  await window.screenshot({ path: path.join(qaDirectory, 'desktop-dialog-430.png') });
+  await window.locator('#dialog-close-button').click();
 } finally {
   await browser?.close().catch(() => undefined);
   await stopDesktop(desktop);
@@ -64,6 +119,45 @@ try {
 }
 
 process.stdout.write(`Smoke de escritorio correcto: ${process.platform}/${process.arch}\n`);
+
+async function layoutSnapshot(window) {
+  return window.evaluate(() => {
+    const selectors = ['.sidebar', '.run-main', '.inspector'];
+    return {
+      canScrollX: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      canScrollY: document.documentElement.scrollHeight > document.documentElement.clientHeight,
+      regions: selectors.map((selector) => {
+        const element = document.querySelector(selector);
+        const rect = element?.getBoundingClientRect();
+        return {
+          selector,
+          visible: Boolean(rect && rect.width > 0 && rect.height > 0),
+          inViewport: Boolean(rect && rect.left >= 0 && rect.top >= 0
+            && rect.right <= innerWidth + 1 && rect.bottom <= innerHeight + 1),
+        };
+      }),
+    };
+  });
+}
+
+async function compactSessionsSnapshot(window) {
+  return window.evaluate(() => {
+    const selectors = ['.inspector', '.tabs', '#sessions-panel'];
+    return {
+      canScrollX: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      regions: selectors.map((selector) => {
+        const element = document.querySelector(selector);
+        const rect = element?.getBoundingClientRect();
+        return {
+          selector,
+          visible: Boolean(rect && rect.width > 0 && rect.height > 0),
+          inViewport: Boolean(rect && rect.left >= 0 && rect.top >= 0
+            && rect.right <= innerWidth + 1 && rect.bottom <= innerHeight + 1),
+        };
+      }),
+    };
+  });
+}
 
 async function reservePort() {
   const server = createServer();

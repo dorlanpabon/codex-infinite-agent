@@ -8,6 +8,7 @@ import type { CodexDesktopClient, GoalInfo, GoalStatus, NativeGoalResult, TurnRe
 
 export interface SuperviseOptions {
   resume: boolean;
+  adopting?: boolean;
   signal: AbortSignal;
 }
 
@@ -370,6 +371,8 @@ async function updateGoalSnapshot(state: RunState, goal: GoalInfo): Promise<void
   }
 }
 
+const IN_PROGRESS_RECONCILIATION_ISSUE = 'Existe un turno previo inProgress tras reanudar; fue detenido para evitar duplicar acciones.';
+
 async function reconcileTurns(
   client: CodexDesktopClient,
   state: RunState,
@@ -392,9 +395,12 @@ async function reconcileTurns(
   }
   state.turnCount = state.observedTurnIds.length;
   const latest = turns.at(-1) ?? null;
+  const acknowledgedBlockingTurns = new Set(state.acknowledgedBlockingTurnIds);
   if (latest) {
-    const blockedReason = latest.blockedReason
-      ?? (previousLastTurn?.turnId === latest.turnId ? previousLastTurn.blockedReason : null);
+    const blockedReason = acknowledgedBlockingTurns.has(latest.turnId)
+      ? null
+      : (latest.blockedReason
+        ?? (previousLastTurn?.turnId === latest.turnId ? previousLastTurn.blockedReason : null));
     state.lastTurn = {
       turnId: latest.turnId,
       status: latest.status,
@@ -416,7 +422,6 @@ async function reconcileTurns(
     && !durableTurnIds.has(previousBlockingEvidence.turnId)) {
     return 'El turno asociado a la evidencia de bloqueo ya no existe en el historial durable.';
   }
-  const acknowledgedBlockingTurns = new Set(state.acknowledgedBlockingTurnIds);
   const durableBlockedTurn = turns.find((turn) => !acknowledgedBlockingTurns.has(turn.turnId)
     && typeof turn.blockedReason === 'string' && turn.blockedReason.length > 0);
   const localBlockedTurn = previousLastTurn?.blockedReason && durableTurnIds.has(previousLastTurn.turnId)
@@ -451,7 +456,7 @@ async function reconcileTurns(
   if (previouslyActive && !turns.some((turn) => turn.turnId === previouslyActive)) {
     return 'El turno activo guardado no existe en el historial durable; no se reactivara el Goal.';
   }
-  if (inProgress.length > 0) return 'Existe un turno previo inProgress tras reanudar; fue detenido para evitar duplicar acciones.';
+  if (inProgress.length > 0) return IN_PROGRESS_RECONCILIATION_ISSUE;
   const unsafeRecoveredTurn = turns.find((turn) => !state.acknowledgedBlockingTurnIds.includes(turn.turnId)
     && (turn.status === 'failed' || turn.status === 'interrupted'));
   if (unsafeRecoveredTurn) {
@@ -484,6 +489,27 @@ async function reconcileTurns(
   return null;
 }
 
+async function reconcileAdoptionTurns(
+  client: CodexDesktopClient,
+  state: RunState,
+  activationWasPending: boolean,
+  goalWasMissing: boolean,
+  signal: AbortSignal,
+): Promise<string | null> {
+  while (true) {
+    const issue = await reconcileTurns(client, state, activationWasPending, goalWasMissing);
+    if (issue !== IN_PROGRESS_RECONCILIATION_ISSUE) return issue;
+    const snapshot = await client.readThread(state.threadId!);
+    if (!threadIsActive(snapshot.status)) return issue;
+    await appendRunEvent(state.runId, 'adoption_waiting_for_idle', { threadId: state.threadId });
+    await client.waitForThreadIdle(
+      state.threadId!,
+      Math.max(1, state.maxWallTimeMs - elapsedMs(state)),
+      signal,
+    );
+  }
+}
+
 function completionTurnIssue(state: RunState): string | null {
   if (state.activeTurnId) return 'El Goal declaro complete con un turno todavia activo.';
   if (state.blockingEvidence) return `El Goal solicito una interaccion no disponible: ${state.blockingEvidence.reason}`;
@@ -508,12 +534,17 @@ async function observeGoal(
   state: RunState,
   signal: AbortSignal,
   objective?: string,
+  hooks: {
+    beforeActivation?(): Promise<void>;
+    onActivationAttempt?(): void;
+  } = {},
 ): Promise<NativeGoalResult> {
   const remainingTurns = state.maxTurns - state.turnCount;
   if (remainingTurns < 1) throw new AppError('GOAL_BUDGET_EXHAUSTED', `Se alcanzo el limite de ${state.maxTurns} turnos.`);
   state.goalActivationPending = true;
   await persistStatus(state, 'running');
   await appendRunEvent(state.runId, 'goal_activation_intent', { threadId: state.threadId, remainingTurns });
+  await hooks.beforeActivation?.();
 
   return client.runNativeGoal({
     threadId: state.threadId!,
@@ -523,6 +554,7 @@ async function observeGoal(
     turnTimeoutMs: state.turnTimeoutMs,
     maxTurns: remainingTurns,
     signal,
+    onActivationAttempt: hooks.onActivationAttempt,
     onActivated: async (goal) => {
       state.goalActivationPending = false;
       await updateGoalSnapshot(state, goal);
@@ -696,6 +728,103 @@ async function verifyCompletedGoal(
 }
 
 export async function supervise(client: CodexDesktopClient, state: RunState, logger: Logger, options: SuperviseOptions): Promise<RunState> {
+  let activationAttempted = false;
+  let adoptionPolicyConfigured = false;
+  const configureManagedThread = async (): Promise<void> => {
+    await client.configureThread({
+      threadId: state.threadId!,
+      workspace: state.workspace,
+      network: state.network,
+      dangerFullAccess: state.dangerFullAccess,
+      ...(state.model ? { model: state.model } : {}),
+      ...(state.effort ? { effort: state.effort } : {}),
+    });
+  };
+  const restoreAdoptionPolicy = async (): Promise<void> => {
+    if (!adoptionPolicyConfigured || !state.threadId) return;
+    await client.restoreSafeThreadSettings(state.threadId);
+    adoptionPolicyConfigured = false;
+  };
+  const prepareAdoptionActivation = async (): Promise<void> => {
+    while (true) {
+      if (options.signal.aborted) throw new AppError('INTERRUPTED', 'Activacion interrumpida antes de modificar el Goal.', 130);
+      let snapshot = await client.readThread(state.threadId!);
+      if (threadIsActive(snapshot.status)) {
+        await appendRunEvent(state.runId, 'adoption_waiting_for_idle', { threadId: state.threadId });
+        snapshot = await client.waitForThreadIdle(
+          state.threadId!,
+          Math.max(1, state.maxWallTimeMs - elapsedMs(state)),
+          options.signal,
+        );
+      }
+      if (!threadIsIdle(snapshot.status)) {
+        throw new AppError('REMOTE_STATE_UNCERTAIN', 'La sesion dejo de estar inactiva antes de activar el modo continuo.');
+      }
+      const ownedGoal = await client.getGoal(state.threadId!);
+      if (!ownedGoal || ownedGoal.status !== 'paused') {
+        throw new AppError('GOAL_OWNERSHIP_MISMATCH', 'El Goal cambio antes de activar el modo continuo.');
+      }
+      captureGoalIdentity(state, ownedGoal);
+      if (options.signal.aborted) throw new AppError('INTERRUPTED', 'Activacion interrumpida antes de modificar el Goal.', 130);
+      const preconfigureSnapshot = await client.readThread(state.threadId!);
+      if (threadIsActive(preconfigureSnapshot.status)) {
+        await appendRunEvent(state.runId, 'adoption_waiting_for_idle', { threadId: state.threadId });
+        await client.waitForThreadIdle(
+          state.threadId!,
+          Math.max(1, state.maxWallTimeMs - elapsedMs(state)),
+          options.signal,
+        );
+        continue;
+      }
+      if (!threadIsIdle(preconfigureSnapshot.status)) {
+        throw new AppError('REMOTE_STATE_UNCERTAIN', 'La sesion dejo de estar inactiva antes de configurar el modo continuo.');
+      }
+
+      adoptionPolicyConfigured = true;
+      await configureManagedThread();
+      const configuredSnapshot = await client.readThread(state.threadId!);
+      if (threadIsActive(configuredSnapshot.status)) {
+        await restoreAdoptionPolicy();
+        await appendRunEvent(state.runId, 'adoption_waiting_for_idle', { threadId: state.threadId });
+        await client.waitForThreadIdle(
+          state.threadId!,
+          Math.max(1, state.maxWallTimeMs - elapsedMs(state)),
+          options.signal,
+        );
+        continue;
+      }
+      if (!threadIsIdle(configuredSnapshot.status)) {
+        await restoreAdoptionPolicy();
+        throw new AppError('REMOTE_STATE_UNCERTAIN', 'La sesion dejo de estar inactiva antes de activar el modo continuo.');
+      }
+      const activationGoal = await client.getGoal(state.threadId!);
+      if (!activationGoal || activationGoal.status !== 'paused') {
+        await restoreAdoptionPolicy();
+        throw new AppError('GOAL_OWNERSHIP_MISMATCH', 'El Goal cambio antes de activar el modo continuo.');
+      }
+      captureGoalIdentity(state, activationGoal);
+      const activationSnapshot = await client.readThread(state.threadId!);
+      if (threadIsActive(activationSnapshot.status)) {
+        await restoreAdoptionPolicy();
+        await appendRunEvent(state.runId, 'adoption_waiting_for_idle', { threadId: state.threadId });
+        await client.waitForThreadIdle(
+          state.threadId!,
+          Math.max(1, state.maxWallTimeMs - elapsedMs(state)),
+          options.signal,
+        );
+        continue;
+      }
+      if (!threadIsIdle(activationSnapshot.status)) {
+        await restoreAdoptionPolicy();
+        throw new AppError('REMOTE_STATE_UNCERTAIN', 'La sesion dejo de estar inactiva antes de activar el modo continuo.');
+      }
+      if (options.signal.aborted) {
+        await restoreAdoptionPolicy();
+        throw new AppError('INTERRUPTED', 'Activacion interrumpida antes de modificar el Goal.', 130);
+      }
+      return;
+    }
+  };
   try {
     if (options.signal.aborted && !options.resume) {
       if (state.threadId) {
@@ -714,12 +843,20 @@ export async function supervise(client: CodexDesktopClient, state: RunState, log
     let initialObjectiveRequired = false;
     if (options.resume) {
       if (!state.threadId) throw new AppError('RUN_NOT_STARTED', 'La ejecucion guardada no tiene thread de Codex Desktop.');
-      const snapshot = await client.readThread(state.threadId);
+      let snapshot = await client.readThread(state.threadId);
       if (!samePath(snapshot.cwd, state.workspace)) throw new AppError('WORKSPACE_MISMATCH', 'El thread persistido pertenece a otro workspace.');
       if (!threadIsActive(snapshot.status) && !threadIsIdle(snapshot.status)
         && (snapshot.status as { type?: unknown }).type !== 'notLoaded') {
         await persistStatus(state, 'blocked', 'El thread de Codex Desktop no esta disponible para reanudacion segura.');
         return state;
+      }
+      if (options.adopting && threadIsActive(snapshot.status)) {
+        await appendRunEvent(state.runId, 'adoption_waiting_for_idle', { threadId: state.threadId });
+        snapshot = await client.waitForThreadIdle(
+          state.threadId,
+          Math.max(1, state.maxWallTimeMs - elapsedMs(state)),
+          options.signal,
+        );
       }
       let existingGoal = await client.getGoal(state.threadId);
       const goalWasMissing = existingGoal === null;
@@ -744,7 +881,7 @@ export async function supervise(client: CodexDesktopClient, state: RunState, log
         await persistStatus(state, 'blocked', 'El Goal durable desaparecio despues de haber iniciado; no se creara otro automaticamente.');
         return state;
       }
-      const resumedThread = await client.resumeThread(state.threadId, state.workspace, state.model ?? undefined);
+      let resumedThread = await client.resumeThread(state.threadId, state.workspace, state.model ?? undefined);
       if (!samePath(resumedThread.cwd, state.workspace)) {
         throw new AppError('WORKSPACE_MISMATCH', 'El thread persistido pertenece a otro workspace.');
       }
@@ -752,7 +889,35 @@ export async function supervise(client: CodexDesktopClient, state: RunState, log
         await persistStatus(state, 'blocked', 'Codex Desktop no cargo el thread en un estado seguro.');
         return state;
       }
+      if (options.adopting && threadIsActive(resumedThread.status)) {
+        await appendRunEvent(state.runId, 'adoption_waiting_for_idle', { threadId: state.threadId });
+        resumedThread = await client.waitForThreadIdle(
+          state.threadId,
+          Math.max(1, state.maxWallTimeMs - elapsedMs(state)),
+          options.signal,
+        );
+      }
+      if (options.adopting) {
+        existingGoal = await client.getGoal(state.threadId);
+        if (!existingGoal || existingGoal.status !== 'paused') {
+          client.releaseThreadOwnership(state.threadId);
+          await persistStatus(state, 'blocked', 'El Goal cambio durante la adopcion; no se modifico ni se interrumpio el turno manual.');
+          return state;
+        }
+        try {
+          captureGoalIdentity(state, existingGoal);
+        } catch (error) {
+          client.releaseThreadOwnership(state.threadId);
+          await persistStatus(state, 'blocked', errorMessage(error));
+          return state;
+        }
+      }
       if (options.signal.aborted) {
+        if (options.adopting) {
+          client.releaseThreadOwnership(state.threadId);
+          await persistStatus(state, 'paused', 'Adopcion interrumpida sin modificar el turno manual.');
+          return state;
+        }
         await pauseForAbort(client, state);
         await persistStatus(state, 'paused', 'Ejecucion interrumpida por el usuario.');
         return state;
@@ -835,8 +1000,13 @@ export async function supervise(client: CodexDesktopClient, state: RunState, log
         existingGoal = await client.setGoal(state.threadId, undefined, 'paused');
         captureGoalIdentity(state, existingGoal);
       }
-      const reconciliationIssue = await reconcileTurns(client, state, activationWasPending, goalWasMissing);
-      if (reconciliationIssue) return finishBlocked(client, state, reconciliationIssue);
+      const reconciliationIssue = options.adopting
+        ? await reconcileAdoptionTurns(client, state, activationWasPending, goalWasMissing, options.signal)
+        : await reconcileTurns(client, state, activationWasPending, goalWasMissing);
+      if (reconciliationIssue) {
+        if (options.adopting) throw new AppError('ADOPTION_RECONCILIATION_FAILED', reconciliationIssue);
+        return finishBlocked(client, state, reconciliationIssue);
+      }
       initialObjectiveRequired = existingGoal === null;
       await appendRunEvent(state.runId, 'resumed', { threadId: state.threadId });
     } else {
@@ -849,17 +1019,13 @@ export async function supervise(client: CodexDesktopClient, state: RunState, log
       await appendRunEvent(state.runId, 'thread_started', { threadId: thread.id });
     }
 
-    await client.configureThread({
-      threadId: state.threadId!,
-      workspace: state.workspace,
-      network: state.network,
-      dangerFullAccess: state.dangerFullAccess,
-      ...(state.model ? { model: state.model } : {}),
-      ...(state.effort ? { effort: state.effort } : {}),
-    });
+    if (!options.adopting) await configureManagedThread();
 
     let goal = await client.getGoal(state.threadId!);
     if (goal) await updateGoalSnapshot(state, goal);
+    if (options.adopting && (!goal || goal.status !== 'paused')) {
+      throw new AppError('GOAL_OWNERSHIP_MISMATCH', 'El Goal cambio antes de activar el modo continuo.');
+    }
     if (goal?.status === 'usageLimited' && !options.resume) {
       return finishBudget(client, state, 'Codex Desktop alcanzo el limite de uso de la cuenta.', 'usageLimited', true);
     }
@@ -870,27 +1036,38 @@ export async function supervise(client: CodexDesktopClient, state: RunState, log
 
     while (true) {
       if (options.signal.aborted) {
+        if (options.adopting && !activationAttempted) {
+          await restoreAdoptionPolicy();
+          client.releaseThreadOwnership(state.threadId!);
+          await persistStatus(state, 'paused', 'Adopcion interrumpida sin modificar el turno manual.');
+          return state;
+        }
         await pauseForAbort(client, state);
         await persistStatus(state, 'paused', 'Ejecucion interrumpida por el usuario.');
         return state;
       }
       const exhausted = goal?.status === 'complete' ? completionResourceIssue(state) : budgetReason(state);
-      if (exhausted) return finishBudget(client, state, exhausted);
+      if (exhausted) {
+        if (options.adopting && !activationAttempted) {
+          throw new AppError('GOAL_BUDGET_EXHAUSTED', exhausted);
+        }
+        return finishBudget(client, state, exhausted);
+      }
 
       if (shouldActivate) {
-        await client.configureThread({
-          threadId: state.threadId!,
-          workspace: state.workspace,
-          network: state.network,
-          dangerFullAccess: state.dangerFullAccess,
-          ...(state.model ? { model: state.model } : {}),
-          ...(state.effort ? { effort: state.effort } : {}),
-        });
+        if (!options.adopting || activationAttempted) await configureManagedThread();
         const result = await observeGoal(
           client,
           state,
           options.signal,
           initialObjectiveRequired ? state.objective : undefined,
+          options.adopting && !activationAttempted ? {
+            beforeActivation: prepareAdoptionActivation,
+            onActivationAttempt: () => {
+              activationAttempted = true;
+              adoptionPolicyConfigured = false;
+            },
+          } : {},
         );
         initialObjectiveRequired = false;
         state.goalActivationPending = false;
@@ -967,6 +1144,23 @@ export async function supervise(client: CodexDesktopClient, state: RunState, log
     }
   } catch (error) {
     const original = errorMessage(error);
+    if (options.adopting && !activationAttempted) {
+      state.goalActivationPending = false;
+      try {
+        await restoreAdoptionPolicy();
+      } catch (cleanupError) {
+        const message = `No se pudo restaurar la politica segura tras abortar la adopcion: ${errorMessage(cleanupError)}`;
+        await persistStatus(state, 'failed', message).catch(() => undefined);
+        throw new AppError('REMOTE_STATE_UNCERTAIN', message, 1, { cause: cleanupError });
+      }
+      if (state.threadId) client.releaseThreadOwnership(state.threadId);
+      if (options.signal.aborted) {
+        await persistStatus(state, 'paused', 'Adopcion interrumpida sin modificar el turno manual.');
+        return state;
+      }
+      await persistStatus(state, 'failed', original).catch(() => undefined);
+      throw error;
+    }
     let stopFailure: string | null = null;
     const hostProcessUncertain = error instanceof AppError && error.code === 'HOST_PROCESS_UNCERTAIN';
     if (state.threadId && blockingReason(state) && !hostProcessUncertain) {

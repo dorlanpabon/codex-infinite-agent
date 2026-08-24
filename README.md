@@ -2,7 +2,24 @@
 
 Companion durable para llevar Goals largos de Codex Desktop hasta un resultado verificable. No usa una API key, no invoca `codex exec`, no busca un `codex` instalado en `PATH` y no depende de sentinels de texto.
 
+[![CI](https://github.com/dorlanpabon/codex-infinite-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/dorlanpabon/codex-infinite-agent/actions/workflows/ci.yml)
+
 La interfaz principal es una aplicación de escritorio para Windows, macOS y Linux. El trabajo se ejecuta como un Goal persistido mediante el App Server incluido en Codex Desktop; no puede conectarse a los canales privados del proceso que ya abrió la ventana. Con el mismo usuario y `CODEX_HOME`, ambos comparten autenticación ChatGPT, threads y estado Goal, y el thread creado aparece en Codex Desktop. No usa el flujo de Codex CLI ni requiere instalarlo por separado.
+
+## Descargas
+
+La [página de releases](https://github.com/dorlanpabon/codex-infinite-agent/releases) publica instaladores nativos generados y comprobados en cada sistema operativo:
+
+| Sistema | Arquitectura | Artefacto |
+|---|---|---|
+| Windows | x64 | `Codex-Infinite-<version>-windows-x64-Setup.exe` |
+| macOS | Apple Silicon (arm64) | `Codex-Infinite-<version>-macos-arm64.zip` |
+| Debian/Ubuntu | x64 y arm64 | `Codex-Infinite-<version>-linux-<arch>.deb` |
+| Fedora/RHEL | x64 y arm64 | `Codex-Infinite-<version>-linux-<arch>.rpm` |
+
+La versión `0.2.0` se distribuye como preview sin certificado comercial de Windows ni notarización de Apple. SmartScreen o Gatekeeper pueden mostrar una advertencia. Comprueba siempre el archivo `SHA256SUMS.txt` de la release antes de instalar y no aceptes un binario obtenido fuera de GitHub Releases.
+
+El companion requiere que Codex Desktop esté instalado y que la sesión de ChatGPT esté iniciada. No incluye, copia ni solicita credenciales de OpenAI.
 
 ## Inicio rápido
 
@@ -98,11 +115,11 @@ Si no puede confirmarse el cierre de un proceso o del estado remoto, el lock que
 
 ## Compatibilidad
 
-- Windows x64: bundle firmado de Codex Desktop y aislamiento fuerte de descendientes mediante Windows Job. La versión privada actual exige Windows en `C:` y Git for Windows machine-wide bajo `C:\Program Files`.
+- Windows x64: bundle firmado de Codex Desktop y aislamiento fuerte de descendientes mediante Windows Job. Exige Windows en `C:` y Git for Windows machine-wide bajo `C:\Program Files`.
 - macOS Apple Silicon: bundle firmado en `/Applications/ChatGPT.app`; cierre normal mediante grupo de procesos.
 - Linux x64/arm64: paquete oficial instalado en `/usr/lib/chatgpt`; cierre normal mediante grupo de procesos.
 
-Las operaciones Goal requieren `experimentalApi` del App Server y pueden cambiar entre versiones de Desktop. `doctor` valida transporte y autenticación, no la ejecución completa de `thread/goal/*`. La CI multiplataforma usa mocks y empaqueta la interfaz, pero no sustituye un smoke autenticado de Desktop. Antes de publicar debe repetirse, con cuota disponible, un smoke autenticado que confirme la exposición y ejecución end-to-end de la herramienta Goal nativa `update_goal`. La versión `0.2.0` es privada y no está preparada para publicación npm.
+Las operaciones Goal requieren `experimentalApi` del App Server y pueden cambiar entre versiones de Desktop. `doctor` valida transporte y autenticación, no la ejecución completa de `thread/goal/*`. La CI multiplataforma usa mocks y empaqueta la interfaz, pero no sustituye un smoke autenticado de Desktop. La preview `0.2.0` aún requiere repetir, con cuota disponible, un smoke autenticado que confirme la exposición y ejecución end-to-end de la herramienta Goal nativa `update_goal`; por eso no se presenta como una release estable. El paquete permanece privado para npm y se distribuye únicamente mediante instaladores de GitHub Releases.
 
 ## Desarrollo
 

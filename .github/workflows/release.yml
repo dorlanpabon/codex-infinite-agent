@@ -1,0 +1,153 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            target: windows-x64
+          - runner: macos-15
+            target: macos-arm64
+          - runner: ubuntu-24.04
+            target: linux-x64
+          - runner: ubuntu-24.04-arm
+            target: linux-arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust
+        if: runner.os == 'Windows'
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install Linux packaging tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes fakeroot rpm xvfb
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate release tag
+        run: node scripts/verify-release-tag.mjs
+
+      - name: Build Windows process guard from source
+        if: runner.os == 'Windows'
+        run: npm run native:prepare
+
+      - name: Check
+        run: npm run check
+
+      - name: Build installer
+        run: npm run desktop:make
+
+      - name: Runtime smoke
+        if: runner.os != 'Linux'
+        run: npm run desktop:smoke
+
+      - name: Runtime smoke (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum npm run desktop:smoke
+
+      - name: Collect release assets
+        run: node scripts/collect-release-assets.mjs
+
+      - name: Inspect Windows installer signature
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $signature = Get-AuthenticodeSignature (Get-ChildItem release-assets -Filter *.exe -File).FullName
+          if ($signature.Status -notin @('Valid', 'NotSigned')) {
+            throw "Estado Authenticode invalido: $($signature.Status)"
+          }
+          $signature | Format-List
+
+      - name: Validate macOS archive
+        if: runner.os == 'macOS'
+        run: unzip -t release-assets/*.zip
+
+      - name: Validate Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          dpkg-deb --info release-assets/*.deb
+          dpkg-deb --contents release-assets/*.deb >/dev/null
+          rpm -qpi release-assets/*.rpm
+          rpm -qpl release-assets/*.rpm >/dev/null
+
+      - name: Upload native artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codex-infinite-${{ matrix.target }}
+          path: release-assets/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Download native artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: codex-infinite-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify complete release and checksums
+        run: node scripts/verify-release-assets.mjs
+
+      - name: Create or update prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          warning='Preview sin firma de distribución: Windows puede mostrar SmartScreen y macOS Gatekeeper. Verifica SHA256SUMS.txt antes de instalar. Requiere la aplicación oficial ChatGPT Desktop.'
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --title "Codex Infinite $GITHUB_REF_NAME" --generate-notes --notes "$warning" --prerelease --latest=false
+          fi

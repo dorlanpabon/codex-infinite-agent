@@ -1,6 +1,7 @@
 node_modules/
 dist/
 out/
+release-assets/
 native/windows-job-wrapper/target/
 *.tgz
 *.log

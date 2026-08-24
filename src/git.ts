@@ -159,6 +159,7 @@ function runCommand(command: string, args: string[], cwd: string, timeoutMs = 30
 export async function runGitCommand(args: string[], cwd: string, timeoutMs = 30_000, signal?: AbortSignal): Promise<CommandResult> {
   const binary = await protectedGitExecutable();
   const hooksPath = process.platform === 'win32' ? 'NUL' : '/dev/null';
+  const platformConfig = process.platform === 'win32' ? ['-c', 'core.autocrlf=true'] : [];
   const commandArgs = args[0] === 'diff'
     ? ['diff', '--no-ext-diff', '--no-textconv', ...args.slice(1)]
     : args;
@@ -167,6 +168,7 @@ export async function runGitCommand(args: string[], cwd: string, timeoutMs = 30_
     '-c', 'core.fsmonitor=false',
     '-c', `core.hooksPath=${hooksPath}`,
     '-c', 'credential.helper=',
+    ...platformConfig,
     ...commandArgs,
   ], cwd, timeoutMs, signal);
 }

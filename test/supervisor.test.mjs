@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -761,24 +761,35 @@ test('abort after Goal complete preserves the terminal remote Goal', async (t) =
 });
 
 test('abort during verification preserves a complete remote Goal', async (t) => {
-  await withStateHome(t);
+  const temp = await withStateHome(t);
+  const marker = path.join(temp, 'verification-started');
   const controller = new AbortController();
   const client = new FakeClient(['complete']);
+  const script = `require('node:fs').writeFileSync(${JSON.stringify(marker)},'started');setInterval(()=>{},1000)`;
   const state = createState(process.cwd(), {
-    verifyCommands: ['node -e "setTimeout(() => {}, 60000)"'],
+    verifyCommands: [`node -e ${JSON.stringify(script)}`],
   });
-  const timer = setTimeout(() => controller.abort(), 100);
 
-  const result = await supervise(client, state, silentLogger, {
+  const pending = supervise(client, state, silentLogger, {
     resume: false,
     signal: controller.signal,
   });
-  clearTimeout(timer);
+  const deadline = Date.now() + 5000;
+  let verificationStarted = false;
+  while (!verificationStarted && Date.now() < deadline) {
+    verificationStarted = await access(marker).then(() => true).catch(() => false);
+    if (!verificationStarted) await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  controller.abort();
+  const result = await pending;
 
+  assert.equal(verificationStarted, true);
   assert.equal(result.status, 'paused');
   assert.equal(result.nativeGoalStatus, 'complete');
   assert.equal(client.currentGoal.status, 'complete');
   assert.equal(client.goalUpdates.some(({ status }) => status === 'paused'), false);
+  assert.equal(result.verificationAttempts, 1);
+  assert.notEqual(result.lastVerification, null);
   assert.equal(result.lastVerification.ok, false);
 });
 

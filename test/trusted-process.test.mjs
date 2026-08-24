@@ -117,19 +117,16 @@ test('POSIX managed process termination drains its process group', async (t) => 
 
 test('POSIX managed process can drain descendants after its leader exits naturally', async (t) => {
   if (process.platform === 'win32') return t.skip('POSIX only');
-  const temp = await mkdtemp(path.join(os.tmpdir(), 'codex-infinite-posix-exit-'));
-  const marker = path.join(temp, 'survived.txt');
-  t.after(() => rm(temp, { recursive: true, force: true }));
-  const grandchild = `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'survived'), 1000)`;
-  const parent = `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(grandchild)}],{stdio:'ignore'})`;
+  const grandchild = 'setInterval(()=>{},60000)';
+  const parent = `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(grandchild)}],{stdio:'ignore'}).unref()`;
   const child = spawnManagedProcess(process.execPath, ['-e', parent], { stdio: ['ignore', 'ignore', 'ignore'] });
   await new Promise((resolve, reject) => {
     child.once('error', reject);
     child.once('exit', resolve);
   });
+  assert.doesNotThrow(() => process.kill(-child.pid, 0));
   await terminateProcessTree(child);
-  await new Promise((resolve) => setTimeout(resolve, 1100));
-  await assert.rejects(() => access(marker), { code: 'ENOENT' });
+  assert.throws(() => process.kill(-child.pid, 0), { code: 'ESRCH' });
 });
 
 test('minimal environment removes Windows-only values on POSIX', (t) => {

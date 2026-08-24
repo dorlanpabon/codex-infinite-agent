@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { runGitCommand } from '../dist/git.js';
 import { verifyWorkspace } from '../dist/verify.js';
 
 test('host verification honors abort and returns a failed check', async () => {
@@ -28,6 +29,26 @@ test('host verification preserves quoted Windows command payloads', async (t) =>
 
   assert.equal(result.ok, true, result.summary.join('\n'));
   assert.equal(await readFile(marker, 'utf8'), 'ok');
+});
+
+test('trusted Git accepts a normal CRLF Windows working tree without global config', async (t) => {
+  if (process.platform !== 'win32') return t.skip('Windows only');
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'codex-infinite-git-crlf-'));
+  const tracked = path.join(temp, 'tracked.txt');
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  await writeFile(tracked, 'line\n', 'utf8');
+  for (const args of [
+    ['init'],
+    ['add', 'tracked.txt'],
+    ['-c', 'user.name=Codex Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'initial'],
+  ]) {
+    const result = await runGitCommand(args, temp);
+    assert.equal(result.exitCode, 0, result.stderr || result.stdout);
+  }
+  await writeFile(tracked, 'line\r\n', 'utf8');
+
+  const verification = await verifyWorkspace(temp, []);
+  assert.equal(verification.ok, true, verification.summary.join('\n'));
 });
 
 test('host verification runs quoted POSIX commands with the trusted PATH', async (t) => {

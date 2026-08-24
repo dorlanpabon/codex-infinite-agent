@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#0b0d0c">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; base-uri 'none'; form-action 'none'">
+    <title>Codex Infinite</title>
+    <link rel="stylesheet" href="./app.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#run-main">Saltar al objetivo activo</a>
+
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Navegación de ejecuciones">
+        <header class="brand">
+          <span class="brand-mark" aria-hidden="true">∞</span>
+          <span>
+            <strong>Codex Infinite</strong>
+            <small>Desktop supervisor</small>
+          </span>
+        </header>
+
+        <section class="doctor-strip" aria-labelledby="doctor-title">
+          <div>
+            <span class="eyebrow" id="doctor-title">Codex Desktop</span>
+            <p class="doctor-state" role="status" aria-live="polite">
+              <span class="status-dot status-dot--pending" id="doctor-dot" aria-hidden="true"></span>
+              <span id="doctor-label">Comprobando conexión…</span>
+            </p>
+          </div>
+          <button class="icon-button" id="doctor-button" type="button" aria-label="Ejecutar diagnóstico" title="Ejecutar diagnóstico">
+            <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M16.5 10a6.5 6.5 0 1 1-1.9-4.6M16.5 3.8v4h-4"/></svg>
+          </button>
+        </section>
+
+        <button class="primary-button new-goal-button" id="new-goal-button" type="button">
+          <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg>
+          Nuevo objetivo
+          <kbd>Ctrl N</kbd>
+        </button>
+
+        <div class="run-nav-heading">
+          <span class="eyebrow">Ejecuciones</span>
+          <span class="count" id="run-count" aria-label="0 ejecuciones">0</span>
+        </div>
+        <nav class="run-list" id="run-list" aria-label="Ejecuciones guardadas"></nav>
+        <p class="run-list-empty" id="run-list-empty">Todavía no hay ejecuciones.</p>
+
+        <footer class="sidebar-footer">
+          <span id="system-version">Cargando versión…</span>
+          <span class="connection-state" id="connection-state">Local</span>
+        </footer>
+      </aside>
+
+      <main class="run-main" id="run-main" tabindex="-1">
+        <section class="empty-state" id="empty-state" aria-labelledby="empty-title">
+          <span class="empty-symbol" aria-hidden="true">∞</span>
+          <p class="eyebrow">Sin objetivo seleccionado</p>
+          <h1 id="empty-title">Deja una tarea trabajando con límites claros.</h1>
+          <p>La ejecución permanece vinculada a Codex Desktop y conserva su evidencia local.</p>
+          <button class="primary-button" id="empty-new-goal-button" type="button">Crear objetivo</button>
+        </section>
+
+        <article class="run-detail" id="run-detail" hidden>
+          <header class="run-header">
+            <div class="run-heading">
+              <div class="heading-meta">
+                <span class="status-badge" id="run-status">En espera</span>
+                <span id="run-updated">—</span>
+              </div>
+              <h1 id="run-name">Objetivo</h1>
+              <p id="run-objective">—</p>
+            </div>
+            <div class="run-actions" aria-label="Acciones de ejecución">
+              <button class="secondary-button" id="resume-button" type="button">
+                <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m7 5 8 5-8 5z"/></svg>
+                Reanudar
+              </button>
+              <button class="secondary-button" id="pause-button" type="button">
+                <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M7 5v10M13 5v10"/></svg>
+                Pausar
+              </button>
+            </div>
+          </header>
+
+          <section class="metrics" aria-label="Progreso del objetivo">
+            <div class="metric">
+              <span>Turnos</span>
+              <strong id="metric-turns">0 / 0</strong>
+              <progress id="turn-progress" value="0" max="1">0%</progress>
+            </div>
+            <div class="metric">
+              <span>Tokens</span>
+              <strong id="metric-tokens">0</strong>
+              <small id="token-caption">Sin presupuesto</small>
+            </div>
+            <div class="metric">
+              <span>Tiempo activo</span>
+              <strong id="metric-time">0 min</strong>
+              <small id="time-caption">—</small>
+            </div>
+            <div class="metric">
+              <span>Verificaciones</span>
+              <strong id="metric-verifications">0</strong>
+              <small id="verification-caption">Sin ejecutar</small>
+            </div>
+          </section>
+
+          <section class="error-banner" id="error-banner" role="alert" hidden>
+            <span aria-hidden="true">!</span>
+            <div>
+              <strong>Requiere atención</strong>
+              <p id="error-message"></p>
+            </div>
+          </section>
+
+          <section class="detail-section" aria-labelledby="activity-title">
+            <header class="section-heading">
+              <div>
+                <span class="eyebrow">Estado durable</span>
+                <h2 id="activity-title">Actividad actual</h2>
+              </div>
+              <span class="goal-state" id="native-goal-status">Goal sin activar</span>
+            </header>
+            <dl class="detail-list">
+              <div><dt>Workspace</dt><dd id="run-workspace">—</dd></div>
+              <div><dt>Thread de Desktop</dt><dd id="run-thread">Pendiente</dd></div>
+              <div><dt>Último turno</dt><dd id="run-last-turn">Sin turnos</dd></div>
+              <div><dt>Modelo</dt><dd id="run-model">Predeterminado</dd></div>
+              <div><dt>Permisos</dt><dd id="run-permissions">Workspace protegido</dd></div>
+            </dl>
+          </section>
+
+          <section class="detail-section" aria-labelledby="verification-title">
+            <header class="section-heading">
+              <div>
+                <span class="eyebrow">Guardas finales</span>
+                <h2 id="verification-title">Verificación</h2>
+              </div>
+              <span id="verification-date">Sin evidencia</span>
+            </header>
+            <p class="section-empty" id="verification-empty">No se ha ejecutado una verificación todavía.</p>
+            <ul class="verification-list" id="verification-list"></ul>
+          </section>
+        </article>
+      </main>
+
+      <aside class="inspector" aria-label="Inspector y registro">
+        <div class="tabs" role="tablist" aria-label="Panel secundario">
+          <button class="tab is-active" id="inspector-tab" type="button" role="tab" aria-selected="true" aria-controls="inspector-panel">Inspector</button>
+          <button class="tab" id="logs-tab" type="button" role="tab" aria-selected="false" aria-controls="logs-panel">Registro <span id="log-count">0</span></button>
+        </div>
+
+        <section class="tab-panel" id="inspector-panel" role="tabpanel" aria-labelledby="inspector-tab">
+          <div class="inspector-section">
+            <span class="eyebrow">Ejecución seleccionada</span>
+            <dl class="inspector-list">
+              <div><dt>Run ID</dt><dd id="inspect-run-id">—</dd></div>
+              <div><dt>Creada</dt><dd id="inspect-created">—</dd></div>
+              <div><dt>Límite</dt><dd id="inspect-limit">—</dd></div>
+              <div><dt>Git inicial</dt><dd id="inspect-git">—</dd></div>
+            </dl>
+          </div>
+
+          <div class="inspector-section">
+            <div class="inspector-title-row">
+              <span class="eyebrow">Codex Desktop</span>
+              <button class="text-button" id="threads-refresh-button" type="button">Actualizar</button>
+            </div>
+            <dl class="inspector-list">
+              <div><dt>Cuenta</dt><dd id="inspect-account">Comprobando…</dd></div>
+              <div><dt>App Server</dt><dd id="inspect-server">—</dd></div>
+              <div><dt>Binario</dt><dd id="inspect-binary">—</dd></div>
+            </dl>
+          </div>
+
+          <div class="inspector-section">
+            <span class="eyebrow">Tareas recientes de Desktop</span>
+            <p class="section-empty compact" id="threads-empty">No se han consultado tareas.</p>
+            <ul class="thread-list" id="thread-list"></ul>
+          </div>
+        </section>
+
+        <section class="tab-panel logs-panel" id="logs-panel" role="tabpanel" aria-labelledby="logs-tab" hidden>
+          <div class="log-toolbar">
+            <span>Eventos de esta sesión</span>
+            <button class="text-button" id="clear-logs-button" type="button">Limpiar</button>
+          </div>
+          <ol class="log-list" id="log-list" role="log" aria-live="polite" aria-relevant="additions"></ol>
+          <p class="section-empty compact" id="logs-empty">Los eventos aparecerán aquí.</p>
+        </section>
+      </aside>
+    </div>
+
+    <dialog class="goal-dialog" id="goal-dialog" aria-labelledby="goal-dialog-title" aria-describedby="goal-dialog-description">
+      <form id="goal-form" method="dialog">
+        <header class="dialog-header">
+          <div>
+            <span class="eyebrow">Codex Desktop</span>
+            <h2 id="goal-dialog-title">Nuevo objetivo</h2>
+            <p id="goal-dialog-description">Define el resultado, los límites y el workspace que Codex puede modificar.</p>
+          </div>
+          <button class="icon-button" id="dialog-close-button" type="button" aria-label="Cerrar">
+            <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15"/></svg>
+          </button>
+        </header>
+
+        <div class="dialog-body">
+          <div class="field">
+            <label for="goal-objective">Objetivo <span aria-hidden="true">*</span></label>
+            <textarea id="goal-objective" name="objective" rows="5" maxlength="4000" required placeholder="Describe un resultado verificable, los límites y cuándo debe considerarse terminado."></textarea>
+            <div class="field-meta"><span>Será el Goal durable de Codex Desktop.</span><span id="objective-count">0 / 4000</span></div>
+          </div>
+
+          <div class="field">
+            <label for="goal-name">Nombre visible</label>
+            <input id="goal-name" name="name" type="text" maxlength="128" autocomplete="off" placeholder="Se genera a partir del objetivo">
+          </div>
+
+          <div class="field">
+            <label for="goal-workspace">Workspace <span aria-hidden="true">*</span></label>
+            <div class="picker-row">
+              <input id="goal-workspace" name="workspace" type="text" maxlength="32767" required spellcheck="false" placeholder="Ruta del repositorio Git">
+              <button class="secondary-button" id="workspace-picker-button" type="button">Elegir…</button>
+            </div>
+          </div>
+
+          <div class="limits-grid">
+            <div class="field">
+              <label for="goal-max-turns">Turnos máximos</label>
+              <input id="goal-max-turns" name="maxTurns" type="number" min="1" max="1000" step="1" value="30" required>
+            </div>
+            <div class="field">
+              <label for="goal-max-hours">Horas máximas</label>
+              <input id="goal-max-hours" name="maxHours" type="number" min="0.25" max="720" step="0.25" value="8" required>
+            </div>
+            <div class="field">
+              <label for="goal-turn-minutes">Minutos por turno</label>
+              <input id="goal-turn-minutes" name="turnMinutes" type="number" min="1" max="1440" step="1" value="45" required>
+            </div>
+            <div class="field">
+              <label for="goal-token-budget">Presupuesto de tokens</label>
+              <input id="goal-token-budget" name="tokenBudget" type="number" min="1" max="2000000000" step="1" placeholder="Sin límite explícito">
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="goal-verify">Comandos de verificación</label>
+            <textarea id="goal-verify" name="verifyCommands" rows="3" placeholder="npm test&#10;npm run typecheck" aria-describedby="verify-help"></textarea>
+            <span class="field-help" id="verify-help">Un comando por línea; se ejecutan antes de completar.</span>
+          </div>
+
+          <details class="advanced" id="advanced-settings">
+            <summary>
+              <span>Opciones avanzadas</span>
+              <small>Modelo, binario y permisos</small>
+            </summary>
+            <div class="advanced-content">
+              <div class="limits-grid limits-grid--two">
+                <div class="field">
+                  <label for="goal-model">Modelo</label>
+                  <input id="goal-model" name="model" type="text" maxlength="256" autocomplete="off" placeholder="Predeterminado de Desktop">
+                </div>
+                <div class="field">
+                  <label for="goal-effort">Esfuerzo</label>
+                  <select id="goal-effort" name="effort">
+                    <option value="">Predeterminado</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="field">
+                <label for="goal-binary">Binario App Server</label>
+                <div class="picker-row">
+                  <input id="goal-binary" name="binary" type="text" maxlength="32767" spellcheck="false" placeholder="Detectar desde Codex Desktop">
+                  <button class="secondary-button" id="binary-picker-button" type="button">Elegir…</button>
+                </div>
+              </div>
+
+              <fieldset class="permission-options">
+                <legend>Permisos</legend>
+                <label class="check-row">
+                  <input id="goal-network" name="network" type="checkbox">
+                  <span><strong>Permitir red</strong><small>Codex podrá realizar solicitudes externas durante la ejecución.</small></span>
+                </label>
+                <label class="check-row check-row--danger">
+                  <input id="goal-full-access" name="dangerFullAccess" type="checkbox">
+                  <span><strong>Acceso total al sistema</strong><small>Desactiva el aislamiento del workspace. Úsalo solo si la tarea lo exige.</small></span>
+                </label>
+                <label class="danger-confirmation" id="danger-confirmation-row" hidden>
+                  <input id="goal-danger-confirmation" name="dangerConfirmation" type="checkbox">
+                  <span>Entiendo que Codex podrá leer y modificar archivos fuera del workspace.</span>
+                </label>
+              </fieldset>
+
+              <button class="doctor-inline" id="dialog-doctor-button" type="button">
+                <span class="status-dot status-dot--pending" id="dialog-doctor-dot" aria-hidden="true"></span>
+                <span><strong id="dialog-doctor-label">Comprobar configuración</strong><small id="dialog-doctor-detail">Valida cuenta, binario y visibilidad de Desktop.</small></span>
+                <span aria-hidden="true">→</span>
+              </button>
+            </div>
+          </details>
+
+          <p class="form-error" id="form-error" role="alert" hidden></p>
+        </div>
+
+        <footer class="dialog-footer">
+          <span>La ejecución se guarda localmente y aparece en Codex Desktop.</span>
+          <div>
+            <button class="secondary-button" id="dialog-cancel-button" type="button">Cancelar</button>
+            <button class="primary-button" id="goal-submit-button" type="submit">Iniciar objetivo</button>
+          </div>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog class="goal-dialog resume-dialog" id="resume-dialog" aria-labelledby="resume-dialog-title" aria-describedby="resume-dialog-description">
+      <form id="resume-form" method="dialog">
+        <header class="dialog-header">
+          <div>
+            <span class="eyebrow">Autorización nueva</span>
+            <h2 id="resume-dialog-title">Reanudar objetivo</h2>
+            <p id="resume-dialog-description">Los permisos y comandos anteriores no se reutilizan. Autoriza solo lo necesario para esta reanudación.</p>
+          </div>
+          <button class="icon-button" id="resume-close-button" type="button" aria-label="Cerrar">
+            <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15"/></svg>
+          </button>
+        </header>
+
+        <div class="dialog-body">
+          <div class="field">
+            <label for="resume-verify">Comandos de verificación</label>
+            <textarea id="resume-verify" name="verifyCommands" rows="3" maxlength="80000" placeholder="Sin comandos heredados" aria-describedby="resume-verify-help"></textarea>
+            <span class="field-help" id="resume-verify-help">Un comando por línea. Se ejecutan en el shell del host y fuera del sandbox.</span>
+          </div>
+
+          <fieldset class="permission-options">
+            <legend>Permisos para esta reanudación</legend>
+            <label class="check-row">
+              <input id="resume-network" name="network" type="checkbox">
+              <span><strong>Permitir red</strong><small>La autorización no se conservará para la próxima reanudación.</small></span>
+            </label>
+            <label class="check-row check-row--danger">
+              <input id="resume-full-access" name="dangerFullAccess" type="checkbox">
+              <span><strong>Acceso total al sistema</strong><small>Desactiva el aislamiento del workspace para esta reanudación.</small></span>
+            </label>
+            <label class="danger-confirmation" id="resume-danger-confirmation-row" hidden>
+              <input id="resume-danger-confirmation" name="dangerConfirmation" type="checkbox">
+              <span>Entiendo que Codex podrá leer y modificar archivos fuera del workspace.</span>
+            </label>
+          </fieldset>
+
+          <p class="form-error" id="resume-form-error" role="alert" hidden></p>
+        </div>
+
+        <footer class="dialog-footer">
+          <span>La reanudación usa permisos seguros por defecto.</span>
+          <div>
+            <button class="secondary-button" id="resume-cancel-button" type="button">Cancelar</button>
+            <button class="primary-button" id="resume-submit-button" type="submit">Reanudar</button>
+          </div>
+        </footer>
+      </form>
+    </dialog>
+
+    <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+    <div class="sr-only" id="live-status" aria-live="polite" aria-atomic="true"></div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

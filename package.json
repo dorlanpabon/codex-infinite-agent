@@ -1,26 +1,36 @@
 {
   "name": "codex-desktop-infinite-agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
+  "productName": "Codex Infinite",
   "description": "Durable native-Goal companion for the Codex Desktop bundled App Server",
+  "author": "Codex Infinite contributors",
   "type": "module",
+  "main": "dist/desktop/main.js",
   "bin": {
     "codex-infinite": "dist/bin/codex-infinite.js"
   },
   "files": [
     "dist",
     "native/windows-job-wrapper/bin/windows-x64/codex-infinite-job-wrapper.exe",
+    "forge.config.cjs",
     "README.md",
     "SECURITY.md",
     "LICENSE"
   ],
   "scripts": {
     "clean": "node scripts/clean.mjs",
-    "build": "npm run clean --silent && tsc -p tsconfig.json",
+    "build": "npm run clean --silent && tsc -p tsconfig.json && node scripts/copy-desktop-assets.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build --silent && node --test test/*.test.mjs",
-    "check": "npm run typecheck && npm test && npm pack --dry-run",
-    "start": "node dist/bin/codex-infinite.js",
+    "check": "npm run typecheck && npm test && npm pack --dry-run && npm audit",
+    "start": "npm run desktop",
+    "cli": "node dist/bin/codex-infinite.js",
+    "desktop": "npm run build --silent && electron .",
+    "desktop:dev": "npm run build && electron-forge start",
+    "desktop:package": "npm run build && node scripts/package-desktop.mjs && node scripts/harden-desktop-package.mjs",
+    "desktop:smoke": "node scripts/smoke-desktop-package.mjs",
+    "desktop:make": "npm run desktop:package && electron-forge make --skip-package",
     "prepack": "npm run build"
   },
   "keywords": [
@@ -33,14 +43,29 @@
   "engines": {
     "node": ">=22"
   },
-  "os": [
-    "win32"
-  ],
-  "cpu": [
-    "x64"
-  ],
+  "overrides": {
+    "@electron/packager": "20.3.0",
+    "cacache": "20.0.4",
+    "make-fetch-happen": "15.0.6",
+    "tar": "7.5.22",
+    "tmp": "0.2.7"
+  },
   "devDependencies": {
+    "@electron-forge/cli": "^7.11.2",
+    "@electron-forge/maker-deb": "^7.11.2",
+    "@electron-forge/maker-rpm": "^7.11.2",
+    "@electron-forge/maker-squirrel": "^7.11.2",
+    "@electron-forge/maker-zip": "^7.11.2",
+    "@electron/asar": "^4.3.0",
+    "@electron/fuses": "^2.1.3",
+    "@electron/packager": "20.3.0",
+    "@types/electron-squirrel-startup": "^1.0.2",
     "@types/node": "^22.20.1",
+    "electron": "^43.4.1",
+    "playwright": "^1.62.1",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "electron-squirrel-startup": "^1.0.1"
   }
 }

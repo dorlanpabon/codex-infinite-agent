@@ -30,7 +30,7 @@ test('desktop renderer modules and preload are included in the local protocol bu
 });
 
 test('desktop package uses a strict application allowlist', () => {
-  const { packagerConfig } = require('../forge.config.cjs');
+  const { makers, packagerConfig } = require('../forge.config.cjs');
   const isIgnored = (candidate) => packagerConfig.ignore.some((pattern) => pattern.test(candidate));
 
   assert.equal(isIgnored('/dist/desktop/main.js'), false);
@@ -45,4 +45,7 @@ test('desktop package uses a strict application allowlist', () => {
     isIgnored('/native/windows-job-wrapper/bin/windows-x64/codex-infinite-job-wrapper.exe'),
     process.platform !== 'win32',
   );
+  const linuxMakers = makers.filter((maker) => maker.platforms?.includes('linux'));
+  assert.equal(linuxMakers.length, 2);
+  assert.equal(linuxMakers.every((maker) => maker.config.options.bin === packagerConfig.executableName), true);
 });

@@ -206,6 +206,83 @@ test('native Goal observes synchronous activation events and waits for terminal 
   assert.equal(rpc.calls.some(({ method }) => method === 'turn/start'), false);
 });
 
+test('native Goal waits for the next native turn without injecting continuation messages', async (t) => {
+  const { rpc, client } = await openOwnedClient(t);
+  rpc.when('thread/goal/set', ({ params }) => {
+    assert.equal(params.status, 'active');
+    rpc.emit('notification', {
+      method: 'turn/started',
+      params: { threadId: 'thread-owned', turn: { id: 'turn-first', status: 'inProgress' } },
+    });
+    return { goal: goal('active') };
+  });
+
+  const started = [];
+  const completed = [];
+  const promise = client.runNativeGoal({
+    threadId: 'thread-owned',
+    objective: 'Finish safely',
+    tokenBudget: 1000,
+    timeoutMs: 5000,
+    turnTimeoutMs: 5000,
+    maxTurns: 2,
+    signal: new AbortController().signal,
+    onTurnStarted: (turnId) => { started.push(turnId); },
+    onTurnCompleted: (turn) => { completed.push(turn.turnId); },
+  });
+  await new Promise(setImmediate);
+
+  rpc.emit('notification', {
+    method: 'turn/completed',
+    params: {
+      threadId: 'thread-owned',
+      turn: { id: 'turn-first', status: 'completed', error: null, items: [] },
+    },
+  });
+  await new Promise(setImmediate);
+
+  let resolved = false;
+  void promise.then(() => { resolved = true; });
+  await new Promise(setImmediate);
+  assert.equal(resolved, false);
+  assert.deepEqual(started, ['turn-first']);
+  assert.deepEqual(completed, ['turn-first']);
+  assert.equal(rpc.calls.filter(({ method }) => method === 'thread/goal/set').length, 1);
+  assert.equal(rpc.calls.some(({ method }) => method === 'turn/start'), false);
+  assert.equal(rpc.calls.some(({ method }) => method === 'thread/inject_items'), false);
+
+  rpc.emit('notification', {
+    method: 'turn/started',
+    params: { threadId: 'thread-owned', turn: { id: 'turn-second', status: 'inProgress' } },
+  });
+  rpc.emit('notification', {
+    method: 'thread/goal/updated',
+    params: { threadId: 'thread-owned', turnId: 'turn-second', goal: goal('complete', 200) },
+  });
+  rpc.emit('notification', {
+    method: 'turn/completed',
+    params: {
+      threadId: 'thread-owned',
+      turn: {
+        id: 'turn-second',
+        status: 'completed',
+        error: null,
+        items: [{ type: 'agentMessage', text: 'finished', phase: 'final_answer' }],
+      },
+    },
+  });
+
+  const result = await promise;
+  assert.deepEqual(started, ['turn-first', 'turn-second']);
+  assert.deepEqual(completed, ['turn-first', 'turn-second']);
+  assert.equal(result.goal.status, 'complete');
+  assert.equal(result.lastTurn.turnId, 'turn-second');
+  assert.equal(result.lastTurn.finalText, 'finished');
+  assert.equal(result.turnsStarted, 2);
+  assert.equal(rpc.calls.some(({ method }) => method === 'turn/start'), false);
+  assert.equal(rpc.calls.some(({ method }) => method === 'thread/inject_items'), false);
+});
+
 test('native Goal recovers the durable final turn when its completion notification is missed', async (t) => {
   const { rpc, client } = await openOwnedClient(t);
   rpc.when('thread/goal/set', () => {

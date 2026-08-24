@@ -17,7 +17,7 @@ La [página de releases](https://github.com/dorlanpabon/codex-infinite-agent/rel
 | Debian/Ubuntu | x64 y arm64 | `Codex-Infinite-<version>-linux-<arch>.deb` |
 | Fedora/RHEL | x64 y arm64 | `Codex-Infinite-<version>-linux-<arch>.rpm` |
 
-La versión `0.2.0` se distribuye como preview sin certificado comercial de Windows ni notarización de Apple. SmartScreen o Gatekeeper pueden mostrar una advertencia. Comprueba siempre el archivo `SHA256SUMS.txt` de la release antes de instalar y no aceptes un binario obtenido fuera de GitHub Releases.
+La versión `0.3.0` se distribuye como preview sin certificado comercial de Windows ni notarización de Apple. SmartScreen o Gatekeeper pueden mostrar una advertencia. Comprueba siempre el archivo `SHA256SUMS.txt` de la release antes de instalar y no aceptes un binario obtenido fuera de GitHub Releases.
 
 El companion requiere que Codex Desktop esté instalado y que la sesión de ChatGPT esté iniciada. No incluye, copia ni solicita credenciales de OpenAI.
 
@@ -31,6 +31,12 @@ npm start
 ```
 
 La aplicación comprueba Desktop y la sesión, permite elegir el workspace, crear o reanudar Goals, pausarlos, revisar su progreso durable y consultar los threads compartidos. Al reanudar, red, acceso total y comandos de verificación vuelven a valores seguros y deben autorizarse otra vez en el diálogo.
+
+### Sesiones activas
+
+La pestaña **Sesiones** muestra los threads persistidos de Codex Desktop junto con su estado de runtime, Goal y supervisor local. El interruptor **Continuar hasta terminar** permite adoptar un thread elegible con un Goal ya pausado, después de confirmar el workspace y el objetivo. Si hay un turno manual activo, el companion solo lo observa y espera su estado `idle`; no activa el Goal ni envía mensajes por temporizador. Solo puede pausar una ejecución que esta instancia haya adoptado.
+
+Los threads sin Goal pausado, con un Goal activo ajeno, sin workspace válido o con estado incompatible se muestran como no disponibles y explican el motivo. El App Server no ofrece una operación condicional para crear un Goal solo si aún no existe, así que el companion falla cerrado en vez de arriesgarse a sobrescribir uno creado en paralelo. La actualización combina eventos del App Server con reconciliación de estado para evitar duplicar trabajo ante eventos perdidos.
 
 ## CLI avanzada
 
@@ -111,7 +117,7 @@ Los códigos de salida son `0` para completado, `1` para configuración/protocol
 
 Si no puede confirmarse el cierre de un proceso o del estado remoto, el lock queda en cuarentena dentro de `~/.codex/infinite-agent/locks`. Elimina únicamente ese archivo después de comprobar manualmente que no quedan procesos ni turnos activos; una reanudación normal no borra la cuarentena.
 
-> No ejecutes el mismo thread simultáneamente en Codex Desktop y en este supervisor. Desktop usa pipes privados para su propio sidecar; este proyecto abre otro sidecar contra el mismo almacenamiento durable y no puede arbitrar un turno abierto en la ventana de Desktop.
+> No envíes manualmente otro turno al mismo thread después de activar **Continuar hasta terminar**. El companion espera un turno manual que ya estuviera activo antes de adoptar el Goal, pero no puede impedir que otra ventana inicie trabajo concurrente después.
 
 ## Compatibilidad
 
@@ -119,7 +125,7 @@ Si no puede confirmarse el cierre de un proceso o del estado remoto, el lock que
 - macOS Apple Silicon: bundle firmado en `/Applications/ChatGPT.app`; cierre normal mediante grupo de procesos.
 - Linux x64/arm64: paquete oficial instalado en `/usr/lib/chatgpt`; cierre normal mediante grupo de procesos.
 
-Las operaciones Goal requieren `experimentalApi` del App Server y pueden cambiar entre versiones de Desktop. `doctor` valida transporte y autenticación, no la ejecución completa de `thread/goal/*`. La CI multiplataforma usa mocks y empaqueta la interfaz, pero no sustituye un smoke autenticado de Desktop. La preview `0.2.0` aún requiere repetir, con cuota disponible, un smoke autenticado que confirme la exposición y ejecución end-to-end de la herramienta Goal nativa `update_goal`; por eso no se presenta como una release estable. El paquete permanece privado para npm y se distribuye únicamente mediante instaladores de GitHub Releases.
+Las operaciones Goal requieren `experimentalApi` del App Server y pueden cambiar entre versiones de Desktop. `doctor` valida transporte y autenticación, no la ejecución completa de `thread/goal/*`. La CI multiplataforma usa mocks y empaqueta la interfaz, pero no sustituye un smoke autenticado de Desktop. La preview `0.3.0` aún requiere, con cuota disponible, un smoke autenticado que confirme la ejecución end-to-end de la herramienta Goal nativa `update_goal`; por eso no se presenta como una release estable. El paquete permanece privado para npm y se distribuye únicamente mediante instaladores de GitHub Releases.
 
 ## Desarrollo
 

@@ -74,7 +74,9 @@ async function connectToDesktop(port, child, readStderr) {
   const deadline = Date.now() + 30_000;
   let lastError;
   while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`Electron termino con codigo ${child.exitCode}: ${readStderr()}`);
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(`Electron termino con codigo ${child.exitCode} y senal ${child.signalCode}: ${readStderr()}`);
+    }
     try {
       return await chromium.connectOverCDP(`http://127.0.0.1:${port}`, { timeout: 1000 });
     } catch (error) {
@@ -97,14 +99,27 @@ async function findAppWindow(browser) {
 }
 
 async function stopDesktop(child) {
-  if (child.exitCode !== null) return;
+  if (child.exitCode !== null || child.signalCode !== null) return;
   if (process.platform === 'win32') child.kill();
-  else process.kill(-child.pid, 'SIGTERM');
+  else {
+    try {
+      process.kill(-child.pid, 'SIGTERM');
+    } catch (error) {
+      if (error.code === 'ESRCH') return;
+      throw error;
+    }
+  }
   const exited = await Promise.race([
     new Promise((resolve) => child.once('exit', () => resolve(true))),
     new Promise((resolve) => setTimeout(() => resolve(false), 5000)),
   ]);
   if (exited) return;
   if (process.platform === 'win32') child.kill('SIGKILL');
-  else process.kill(-child.pid, 'SIGKILL');
+  else {
+    try {
+      process.kill(-child.pid, 'SIGKILL');
+    } catch (error) {
+      if (error.code !== 'ESRCH') throw error;
+    }
+  }
 }

@@ -1,5 +1,5 @@
 import type { BinaryInfo } from '../app-server/binary.js';
-import type { ThreadInfo } from '../app-server/client.js';
+import type { GoalInfo, ThreadInfo } from '../app-server/client.js';
 import type { RunState } from '../state.js';
 
 export const DESKTOP_ORIGIN = 'codex-infinite://app';
@@ -34,6 +34,10 @@ export interface ResumeRunInput {
   binary: string | null;
 }
 
+export interface AttachRunInput extends StartRunInput {
+  threadId: string;
+}
+
 export interface DoctorInput {
   workspace: string | null;
   binary: string | null;
@@ -43,6 +47,17 @@ export interface ThreadsInput {
   workspace: string | null;
   binary: string | null;
   limit: number;
+}
+
+export interface DesktopSessionInfo {
+  thread: ThreadInfo;
+  goal: GoalInfo | null;
+  goalError: string | null;
+  localRun: RunState | null;
+  operationActive: boolean;
+  canEnable: boolean;
+  canDisable: boolean;
+  unavailableReason: string | null;
 }
 
 export interface DoctorResult {
@@ -65,7 +80,7 @@ export interface OperationReceipt {
 }
 
 export type DesktopEvent =
-  | { type: 'operation-started'; operationId: string; runId: string | null; kind: 'start' | 'resume' | 'pause' }
+  | { type: 'operation-started'; operationId: string; runId: string | null; kind: 'start' | 'attach' | 'resume' | 'pause' }
   | { type: 'run-changed'; operationId: string; run: RunState }
   | { type: 'operation-finished'; operationId: string; run: RunState }
   | { type: 'operation-error'; operationId: string; runId: string | null; error: { code: string; message: string } }
@@ -79,9 +94,11 @@ export interface DesktopApi {
   listRuns(): Promise<RunState[]>;
   getRun(runId: string): Promise<RunState>;
   startRun(input: StartRunInput): Promise<OperationReceipt>;
+  attachRun(input: AttachRunInput): Promise<OperationReceipt>;
   resumeRun(input: ResumeRunInput): Promise<OperationReceipt>;
   pauseRun(runId: string): Promise<OperationReceipt>;
   listThreads(input: ThreadsInput): Promise<ThreadInfo[]>;
+  listSessions(input: ThreadsInput): Promise<DesktopSessionInfo[]>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;
 }
 
@@ -112,6 +129,10 @@ function runId(value: unknown): value is string {
   return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
+function threadId(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 128 && !/[\x00-\x1f\x7f]/u.test(value);
+}
+
 export function parseStartRunInput(value: unknown): StartRunInput {
   const keys = [
     'binary', 'dangerConfirmation', 'dangerFullAccess', 'effort', 'maxHours', 'maxTurns', 'model', 'name',
@@ -136,6 +157,12 @@ export function parseStartRunInput(value: unknown): StartRunInput {
   }
   if (value.dangerFullAccess && !value.dangerConfirmation) throw new TypeError('Confirma el acceso total antes de iniciar.');
   return value as unknown as StartRunInput;
+}
+
+export function parseAttachRunInput(value: unknown): AttachRunInput {
+  if (!isRecord(value) || !threadId(value.threadId)) throw new TypeError('Parametros de adjuncion invalidos.');
+  const { threadId: parsedThreadId, ...start } = value;
+  return { ...parseStartRunInput(start), threadId: parsedThreadId };
 }
 
 export function parseResumeRunInput(value: unknown): ResumeRunInput {
@@ -169,5 +196,10 @@ export function parseThreadsInput(value: unknown): ThreadsInput {
 
 export function parseRunId(value: unknown): string {
   if (!runId(value)) throw new TypeError('Run ID invalido.');
+  return value;
+}
+
+export function parseThreadId(value: unknown): string {
+  if (!threadId(value)) throw new TypeError('Thread ID invalido.');
   return value;
 }

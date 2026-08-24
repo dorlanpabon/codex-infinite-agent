@@ -206,6 +206,46 @@ test('native Goal observes synchronous activation events and waits for terminal 
   assert.equal(rpc.calls.some(({ method }) => method === 'turn/start'), false);
 });
 
+test('thread idle wait is event-driven and never sends a continuation', async (t) => {
+  const rpc = new FakeTransport();
+  const client = new CodexDesktopClient(rpc, logger);
+  t.after(() => client.close());
+  let readCount = 0;
+  let resolveFirstRead;
+  rpc.when('thread/resume', () => ({
+    thread: { ...thread('thread-owned'), status: { type: 'active', activeFlags: [] } },
+  }));
+  rpc.when('thread/read', () => {
+    readCount += 1;
+    if (readCount === 1) {
+      return new Promise((resolve) => {
+        resolveFirstRead = () => resolve({
+          thread: { ...thread('thread-owned'), status: { type: 'active', activeFlags: [] } },
+        });
+      });
+    }
+    return { thread: { ...thread('thread-owned'), status: { type: 'idle' } } };
+  });
+  await client.resumeThread('thread-owned', 'D:\\workspace');
+
+  const waiting = client.waitForThreadIdle('thread-owned', 5000, new AbortController().signal);
+  await new Promise(setImmediate);
+  assert.equal(typeof resolveFirstRead, 'function');
+  assert.equal(rpc.calls.some(({ method }) => method === 'thread/goal/set'), false);
+  assert.equal(rpc.calls.some(({ method }) => method === 'turn/start'), false);
+  assert.equal(rpc.calls.some(({ method }) => method === 'thread/inject_items'), false);
+
+  rpc.emit('notification', {
+    method: 'turn/completed',
+    params: { threadId: 'thread-owned', turn: { id: 'turn-existing', status: 'completed' } },
+  });
+  resolveFirstRead();
+  const result = await waiting;
+  assert.equal(result.status.type, 'idle');
+  assert.equal(readCount, 2);
+  assert.equal(rpc.calls.some(({ method }) => method === 'thread/goal/set'), false);
+});
+
 test('native Goal waits for the next native turn without injecting continuation messages', async (t) => {
   const { rpc, client } = await openOwnedClient(t);
   rpc.when('thread/goal/set', ({ params }) => {
@@ -522,6 +562,33 @@ test('thread responses reject unknown status variants', async (t) => {
   const { rpc, client } = await openOwnedClient(t);
   rpc.when('thread/read', () => ({ thread: { ...thread('thread-owned'), status: { type: 'futureState' } } }));
   await assert.rejects(() => client.readThread('thread-owned'), /estado de thread invalido/);
+});
+
+test('thread/read rejects a valid response for a different thread', async (t) => {
+  const { rpc, client } = await openOwnedClient(t);
+  rpc.when('thread/read', () => ({ thread: thread('thread-other') }));
+  await assert.rejects(
+    () => client.readThread('thread-owned'),
+    (error) => error?.code === 'THREAD_ID_MISMATCH',
+  );
+});
+
+test('native Goal does not report an activation attempt before preflight passes', async (t) => {
+  const { client } = await openOwnedClient(t);
+  const controller = new AbortController();
+  let attempted = false;
+  controller.abort();
+
+  await assert.rejects(() => client.runNativeGoal({
+    threadId: 'thread-owned',
+    objective: 'Finish safely',
+    timeoutMs: 5000,
+    turnTimeoutMs: 5000,
+    maxTurns: 2,
+    signal: controller.signal,
+    onActivationAttempt: () => { attempted = true; },
+  }), /Interrumpido antes de activar/);
+  assert.equal(attempted, false);
 });
 
 test('server approval requests are denied', async (t) => {

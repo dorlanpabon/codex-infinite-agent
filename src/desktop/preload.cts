@@ -10,9 +10,11 @@ const CHANNELS = {
   listRuns: 'runs:list',
   getRun: 'runs:get',
   startRun: 'runs:start',
+  attachRun: 'runs:attach',
   resumeRun: 'runs:resume',
   pauseRun: 'runs:pause',
   listThreads: 'threads:list',
+  listSessions: 'sessions:list',
   event: 'runs:event',
 } as const;
 
@@ -24,9 +26,11 @@ const api: DesktopApi = {
   listRuns: () => ipcRenderer.invoke(CHANNELS.listRuns),
   getRun: (runId) => ipcRenderer.invoke(CHANNELS.getRun, runId),
   startRun: (input) => ipcRenderer.invoke(CHANNELS.startRun, input),
+  attachRun: (input) => ipcRenderer.invoke(CHANNELS.attachRun, input),
   resumeRun: (input) => ipcRenderer.invoke(CHANNELS.resumeRun, input),
   pauseRun: (runId) => ipcRenderer.invoke(CHANNELS.pauseRun, runId),
   listThreads: (input) => ipcRenderer.invoke(CHANNELS.listThreads, input),
+  listSessions: (input) => ipcRenderer.invoke(CHANNELS.listSessions, input),
   onEvent: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, payload: DesktopEvent): void => listener(payload);
     ipcRenderer.on(CHANNELS.event, handler);

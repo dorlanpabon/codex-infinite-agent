@@ -88,6 +88,7 @@ export interface NativeGoalOptions {
   turnTimeoutMs: number;
   maxTurns: number;
   signal: AbortSignal;
+  onActivationAttempt?(): void;
   onActivated?(goal: GoalInfo): Promise<void> | void;
   onGoalUpdated?(goal: GoalInfo): Promise<void> | void;
   onTurnStarted?(turnId: string): Promise<void> | void;
@@ -316,10 +317,74 @@ export class CodexDesktopClient {
     }
   }
 
+  releaseThreadOwnership(threadId: string): void {
+    if (this.ownedThreadId !== threadId || this.activeTurnId !== null) return;
+    this.ownedThreadId = null;
+    this.ownedWorkspace = null;
+  }
+
   async readThread(threadId: string, timeoutMs = 30_000): Promise<ThreadInfo> {
     const response = await this.rpc.request<unknown>('thread/read', { threadId, includeTurns: false }, timeoutMs);
     if (!isRecord(response)) throw new AppError('INVALID_APP_SERVER_RESPONSE', 'Respuesta thread/read invalida.');
-    return recordThread(response.thread);
+    const thread = recordThread(response.thread);
+    if (thread.id !== threadId) throw new AppError('THREAD_ID_MISMATCH', 'App Server devolvio un thread distinto al solicitado.');
+    return thread;
+  }
+
+  async waitForThreadIdle(threadId: string, timeoutMs: number, signal: AbortSignal): Promise<ThreadInfo> {
+    if (this.ownedThreadId !== threadId) throw new AppError('THREAD_NOT_OWNED', 'El cliente no posee el thread que debe observar.');
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new AppError('INVALID_THREAD_TIMEOUT', 'El limite para esperar el thread debe ser positivo.');
+    }
+    if (signal.aborted) throw new AppError('INTERRUPTED', 'Espera de thread interrumpida.', 130);
+
+    return new Promise<ThreadInfo>((resolve, reject) => {
+      let settled = false;
+      let reading = false;
+      let inspectAgain = false;
+      const finish = (error: unknown, thread?: ThreadInfo): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.rpc.off('notification', listener);
+        signal.removeEventListener('abort', abortListener);
+        if (error) reject(error);
+        else resolve(thread!);
+      };
+      const inspect = (): void => {
+        if (settled) return;
+        if (reading) {
+          inspectAgain = true;
+          return;
+        }
+        reading = true;
+        void this.readThread(threadId, Math.min(30_000, timeoutMs)).then((thread) => {
+          reading = false;
+          if (thread.status.type === 'idle') finish(null, thread);
+          else if (thread.status.type !== 'active') {
+            finish(new AppError('REMOTE_STATE_UNCERTAIN', `El thread cambio a ${thread.status.type} mientras esperaba su turno activo.`));
+          } else if (inspectAgain) {
+            inspectAgain = false;
+            inspect();
+          }
+        }, (error) => finish(error));
+      };
+      const listener = (message: RpcMessage): void => {
+        if (typeof message.method !== 'string' || !isRecord(message.params)) return;
+        const ids = readThreadAndTurn(message.params);
+        if (ids.threadId !== threadId) return;
+        if (message.method === 'turn/completed' || message.method === 'thread/status/changed') inspect();
+      };
+      const abortListener = (): void => finish(new AppError('INTERRUPTED', 'Espera de thread interrumpida.', 130));
+      const timer = setTimeout(() => finish(new AppError(
+        'THREAD_IDLE_TIMEOUT',
+        'El turno activo no termino dentro del limite configurado; no se activo el modo continuo.',
+      )), timeoutMs);
+      timer.unref();
+      this.rpc.on('notification', listener);
+      signal.addEventListener('abort', abortListener, { once: true });
+      inspect();
+    });
   }
 
   async readTurn(threadId: string, turnId: string, timeoutMs = 60_000): Promise<PersistedTurn | null> {
@@ -964,6 +1029,7 @@ export class CodexDesktopClient {
       if (activationRemaining <= 0) throw new AppError('GOAL_TIMEOUT', 'Tiempo agotado antes de activar el Goal.');
       let goal: GoalInfo;
       try {
+        options.onActivationAttempt?.();
         goal = await Promise.race([
           this.setGoal(
             options.threadId,

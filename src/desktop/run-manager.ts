@@ -1,23 +1,25 @@
 import { randomUUID } from 'node:crypto';
 import { AppError, errorMessage } from '../errors.js';
 import { sanitizeLog, type Logger } from '../log.js';
-import { resumeGoal, startGoal } from '../operations.js';
+import { attachGoal, resumeGoal, startGoal } from '../operations.js';
 import type { RunState } from '../state.js';
 import type {
   DesktopEvent,
+  AttachRunInput,
   LogLevel,
   OperationReceipt,
   ResumeRunInput,
   StartRunInput,
 } from './contracts.js';
 
-type OperationKind = 'start' | 'resume';
+type OperationKind = 'start' | 'attach' | 'resume';
 
 interface ActiveOperation {
   controller: AbortController;
   kind: OperationKind;
   promise: Promise<void>;
   runId: string | null;
+  threadId: string | null;
 }
 
 interface LaunchedOperation {
@@ -27,6 +29,7 @@ interface LaunchedOperation {
 
 export interface RunManagerDependencies {
   startGoal: typeof startGoal;
+  attachGoal: typeof attachGoal;
   resumeGoal: typeof resumeGoal;
 }
 
@@ -37,11 +40,15 @@ export class RunManager {
 
   constructor(
     private readonly emit: DesktopEventSink,
-    private readonly dependencies: RunManagerDependencies = { startGoal, resumeGoal },
+    private readonly dependencies: RunManagerDependencies = { startGoal, attachGoal, resumeGoal },
   ) {}
 
   get hasActiveOperations(): boolean {
     return this.operations.size > 0;
+  }
+
+  get activeRunIds(): ReadonlySet<string> {
+    return new Set([...this.operations.values()].flatMap((operation) => operation.runId ? [operation.runId] : []));
   }
 
   async start(input: StartRunInput): Promise<OperationReceipt> {
@@ -60,6 +67,30 @@ export class RunManager {
       dangerFullAccess: input.dangerFullAccess,
       binary: input.binary,
     }, signal, logger, { onRunChanged }));
+    await launched.initialized;
+    return launched.receipt;
+  }
+
+  async attach(input: AttachRunInput): Promise<OperationReceipt> {
+    if ([...this.operations.values()].some((operation) => operation.threadId === input.threadId)) {
+      throw new AppError('THREAD_ALREADY_ACTIVE', 'Esta sesion ya esta siendo activada.');
+    }
+    const launched = this.launch('attach', null, true, async (signal, logger, onRunChanged) => this.dependencies.attachGoal({
+      threadId: input.threadId,
+      objective: input.objective,
+      directory: input.workspace,
+      name: input.name,
+      maxTurns: input.maxTurns,
+      maxHours: input.maxHours,
+      turnMinutes: input.turnMinutes,
+      tokenBudget: input.tokenBudget,
+      verifyCommands: input.verifyCommands,
+      model: input.model,
+      effort: input.effort,
+      network: input.network,
+      dangerFullAccess: input.dangerFullAccess,
+      binary: input.binary,
+    }, signal, logger, { onRunChanged }), input.threadId);
     await launched.initialized;
     return launched.receipt;
   }
@@ -99,6 +130,7 @@ export class RunManager {
       logger: Logger,
       onRunChanged: (state: RunState) => void,
     ) => Promise<RunState>,
+    initialThreadId: string | null = null,
   ): LaunchedOperation {
     if (initialRunId && [...this.operations.values()].some((operation) => operation.runId === initialRunId)) {
       throw new AppError('RUN_ALREADY_ACTIVE', 'Esta ejecucion ya esta activa en la interfaz.');
@@ -118,6 +150,7 @@ export class RunManager {
       kind,
       promise: Promise.resolve(),
       runId: initialRunId,
+      threadId: initialThreadId,
     };
     const announce = (runId: string | null): void => {
       if (announced) return;
@@ -127,6 +160,7 @@ export class RunManager {
     };
     const onRunChanged = (state: RunState): void => {
       operation.runId = state.runId;
+      operation.threadId = state.threadId;
       announce(state.runId);
       this.emit({ type: 'run-changed', operationId, run: state });
     };

@@ -33,6 +33,9 @@ class FakeClient {
     this.failFinalGoalConfirmation = false;
     this.completeGoalReads = 0;
     this.resumeCalls = 0;
+    this.waitForIdleCalls = 0;
+    this.releasedThreadIds = [];
+    this.restoreCalls = 0;
     this.persistedTurns = initialGoal?.status === 'complete' ? [{
       turnId: 'turn-persisted', status: 'completed', finalText: 'done', error: null,
     }] : [];
@@ -53,11 +56,21 @@ class FakeClient {
     return { id: threadId, cwd: workspace, status: { type: 'idle' } };
   }
 
+  async waitForThreadIdle(threadId) {
+    this.waitForIdleCalls += 1;
+    this.threadStatus = { type: 'idle' };
+    return { id: threadId, cwd: process.cwd(), status: this.threadStatus };
+  }
+
+  releaseThreadOwnership(threadId) {
+    this.releasedThreadIds.push(threadId);
+  }
+
   async configureThread(settings) {
     this.configureCalls.push(settings);
   }
 
-  async restoreSafeThreadSettings() {}
+  async restoreSafeThreadSettings() { this.restoreCalls += 1; }
 
   async prepareThreadForTerminal() {}
 
@@ -82,6 +95,7 @@ class FakeClient {
     const index = this.runGoalCalls.length;
     const turnId = `turn-${index}`;
     const active = { ...goal('active', index * 10), tokenBudget: options.tokenBudget ?? null };
+    options.onActivationAttempt?.();
     this.currentGoal = active;
     await options.onActivated?.(active);
     await options.onGoalUpdated?.(active);
@@ -167,6 +181,167 @@ test('supervisor completes only after native Goal and host verification', async 
   assert.equal(result.gitFinal.root, process.cwd());
   assert.equal(client.runGoalCalls.length, 1);
   assert.equal(client.runGoalCalls[0].objective, 'Finish the test goal');
+});
+
+test('adoption waits for a manual turn started before supervise and never interrupts it', async (t) => {
+  await withStateHome(t);
+  const client = new FakeClient(['complete'], goal('paused'));
+  client.threadStatus = { type: 'active', activeFlags: [] };
+  const interrupted = [];
+  client.interrupt = async (_threadId, turnId) => { interrupted.push(turnId); };
+  const state = createState(process.cwd());
+  state.threadId = 'thread-test';
+  state.nativeGoalStatus = 'paused';
+  state.nativeGoalCreatedAt = 1;
+  state.goalTokenBudget = 1000;
+
+  const result = await supervise(client, state, silentLogger, {
+    resume: true,
+    adopting: true,
+    signal: new AbortController().signal,
+  });
+
+  assert.equal(result.status, 'completed');
+  assert.equal(client.waitForIdleCalls, 1);
+  assert.deepEqual(interrupted, []);
+  assert.equal(client.goalUpdates.some(({ status }) => status === 'paused'), false);
+  assert.equal(client.runGoalCalls.length, 1);
+});
+
+test('adoption reconciles a manual turn race without interrupting it', async (t) => {
+  await withStateHome(t);
+  const client = new FakeClient(['complete'], goal('paused'));
+  const interrupted = [];
+  let firstList = true;
+  client.interrupt = async (_threadId, turnId) => { interrupted.push(turnId); };
+  client.listTurns = async () => {
+    if (firstList) {
+      firstList = false;
+      client.threadStatus = { type: 'active', activeFlags: [] };
+      client.persistedTurns = [{
+        turnId: 'turn-manual', status: 'inProgress', finalText: null, error: null, blockedReason: null,
+      }];
+    }
+    return client.persistedTurns;
+  };
+  client.waitForThreadIdle = async (threadId) => {
+    client.waitForIdleCalls += 1;
+    client.threadStatus = { type: 'idle' };
+    client.persistedTurns = [{
+      turnId: 'turn-manual', status: 'completed', finalText: 'manual done', error: null, blockedReason: null,
+    }];
+    return { id: threadId, cwd: process.cwd(), status: client.threadStatus };
+  };
+  const state = createState(process.cwd());
+  state.threadId = 'thread-test';
+  state.nativeGoalStatus = 'paused';
+  state.nativeGoalCreatedAt = 1;
+  state.goalTokenBudget = 1000;
+
+  const result = await supervise(client, state, silentLogger, {
+    resume: true,
+    adopting: true,
+    signal: new AbortController().signal,
+  });
+
+  assert.equal(result.status, 'completed');
+  assert.equal(client.waitForIdleCalls, 1);
+  assert.deepEqual(interrupted, []);
+  assert.equal(client.runGoalCalls.length, 1);
+});
+
+test('adoption validates Goal ownership before elevating thread policy', async (t) => {
+  await withStateHome(t);
+  const client = new FakeClient([], goal('paused'));
+  const originalGetGoal = client.getGoal.bind(client);
+  let goalReads = 0;
+  client.getGoal = async () => {
+    goalReads += 1;
+    if (goalReads >= 4) return { ...goal('active'), objective: 'Competing goal' };
+    return originalGetGoal();
+  };
+  const state = createState(process.cwd());
+  state.threadId = 'thread-test';
+  state.nativeGoalStatus = 'paused';
+  state.nativeGoalCreatedAt = 1;
+  state.goalTokenBudget = 1000;
+
+  await assert.rejects(() => supervise(client, state, silentLogger, {
+    resume: true,
+    adopting: true,
+    signal: new AbortController().signal,
+  }), /Goal cambio|cambio de objetivo/);
+
+  assert.equal(client.configureCalls.length, 0);
+  assert.equal(client.restoreCalls, 0);
+  assert.deepEqual(client.releasedThreadIds, ['thread-test']);
+});
+
+test('adoption restores safe policy when a manual turn starts after configuration', async (t) => {
+  await withStateHome(t);
+  const client = new FakeClient(['complete'], goal('paused'));
+  const interrupted = [];
+  let raced = false;
+  client.interrupt = async (_threadId, turnId) => { interrupted.push(turnId); };
+  client.configureThread = async (settings) => {
+    client.configureCalls.push(settings);
+    if (!raced) {
+      raced = true;
+      client.threadStatus = { type: 'active', activeFlags: [] };
+    }
+  };
+  const state = createState(process.cwd());
+  state.threadId = 'thread-test';
+  state.nativeGoalStatus = 'paused';
+  state.nativeGoalCreatedAt = 1;
+  state.goalTokenBudget = 1000;
+
+  const result = await supervise(client, state, silentLogger, {
+    resume: true,
+    adopting: true,
+    signal: new AbortController().signal,
+  });
+
+  assert.equal(result.status, 'completed');
+  assert.equal(client.waitForIdleCalls, 1);
+  assert.equal(client.restoreCalls, 1);
+  assert.equal(client.configureCalls.length, 2);
+  assert.deepEqual(interrupted, []);
+});
+
+test('aborted preactivation never treats a new manual turn as owned', async (t) => {
+  await withStateHome(t);
+  const controller = new AbortController();
+  const client = new FakeClient([], goal('paused'));
+  const interrupted = [];
+  const originalReadThread = client.readThread.bind(client);
+  let threadReads = 0;
+  client.interrupt = async (_threadId, turnId) => { interrupted.push(turnId); };
+  client.readThread = async (threadId) => {
+    threadReads += 1;
+    if (threadReads === 2) {
+      client.threadStatus = { type: 'active', activeFlags: [] };
+      controller.abort();
+    }
+    return originalReadThread(threadId);
+  };
+  const state = createState(process.cwd());
+  state.threadId = 'thread-test';
+  state.nativeGoalStatus = 'paused';
+  state.nativeGoalCreatedAt = 1;
+  state.goalTokenBudget = 1000;
+
+  const result = await supervise(client, state, silentLogger, {
+    resume: true,
+    adopting: true,
+    signal: controller.signal,
+  });
+
+  assert.equal(result.status, 'paused');
+  assert.equal(client.runGoalCalls.length, 0);
+  assert.equal(client.configureCalls.length, 0);
+  assert.deepEqual(interrupted, []);
+  assert.deepEqual(client.releasedThreadIds, ['thread-test']);
 });
 
 test('supervisor preserves a native blocked result', async (t) => {

@@ -54,6 +54,7 @@ export class RunManager {
   async start(input: StartRunInput): Promise<OperationReceipt> {
     const launched = this.launch('start', null, true, async (signal, logger, onRunChanged) => this.dependencies.startGoal({
       objective: input.objective,
+      attachments: input.attachments,
       directory: input.workspace,
       name: input.name,
       maxTurns: input.maxTurns,
@@ -78,6 +79,7 @@ export class RunManager {
     const launched = this.launch('attach', null, true, async (signal, logger, onRunChanged) => this.dependencies.attachGoal({
       threadId: input.threadId,
       objective: input.objective,
+      attachments: input.attachments,
       directory: input.workspace,
       name: input.name,
       maxTurns: input.maxTurns,

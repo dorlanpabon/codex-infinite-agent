@@ -13,7 +13,7 @@ import {
   staleWorkspaceLockMustQuarantine,
 } from '../dist/state.js';
 
-function stateFor(workspace) {
+function stateFor(workspace, overrides = {}) {
   return createRunState({
     workspace,
     objective: 'Test objective',
@@ -28,6 +28,7 @@ function stateFor(workspace) {
     model: null,
     effort: null,
     gitBaseline: { root: workspace, branch: 'main', head: null, dirty: false },
+    ...overrides,
   });
 }
 
@@ -172,4 +173,52 @@ test('state v2 round-trips bounded native evidence and rejects self-inconsistent
 
   state.turnCount = 2;
   await assert.rejects(() => saveRun(state), /incompatible o corrupto/);
+});
+
+test('state persists the full objective and attachment context beyond the native Goal boundary', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'codex-infinite-context-'));
+  const previous = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = temp;
+  t.after(async () => {
+    if (previous === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previous;
+    await rm(temp, { recursive: true, force: true });
+  });
+
+  const objective = `Termina todo. ${'detalle '.repeat(900)}`;
+  const attachment = path.resolve(temp, 'brief.pdf');
+  const state = stateFor(process.cwd(), { objective, attachments: [attachment] });
+  assert.equal(state.objective, objective);
+  assert.ok(state.goalObjective.length <= 4000);
+  assert.notEqual(state.goalObjective, objective);
+  assert.deepEqual(state.attachments, [attachment]);
+  assert.equal(state.contextInjectionStatus, 'required');
+
+  await saveRun(state);
+  assert.deepEqual(await loadRun(state.runId), state);
+});
+
+test('state loader migrates prior v2 runs without attachment metadata', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'codex-infinite-legacy-'));
+  const previous = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = temp;
+  t.after(async () => {
+    if (previous === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previous;
+    await rm(temp, { recursive: true, force: true });
+  });
+
+  const state = stateFor(process.cwd());
+  await saveRun(state);
+  const statePath = path.join(temp, 'infinite-agent', 'runs', `${state.runId}.json`);
+  const legacy = JSON.parse(await readFile(statePath, 'utf8'));
+  delete legacy.goalObjective;
+  delete legacy.attachments;
+  delete legacy.contextInjectionStatus;
+  await writeFile(statePath, `${JSON.stringify(legacy)}\n`, 'utf8');
+
+  const loaded = await loadRun(state.runId);
+  assert.equal(loaded.goalObjective, loaded.objective);
+  assert.deepEqual(loaded.attachments, []);
+  assert.equal(loaded.contextInjectionStatus, 'notRequired');
 });

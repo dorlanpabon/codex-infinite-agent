@@ -26,6 +26,14 @@ test('desktop renderer modules and preload are included in the local protocol bu
   assert.match(html, /id="sessions-tab"/u);
   assert.match(html, /id="sessions-panel"/u);
   assert.match(html, /id="goal-thread"/u);
+  assert.match(html, /id="attachment-dropzone"/u);
+  assert.match(html, /id="attachment-picker-button"/u);
+  assert.doesNotMatch(html, /id="goal-objective"[^>]*maxlength=/u);
+  assert.match(renderer, /Coloca el objetivo para activar/u);
+  assert.match(renderer, /window\.setTimeout\(\(\) => ui\.objectiveInput\.focus\(\), 0\)/u);
+  assert.match(renderer, /api\.pathForFile\(file\)/u);
+  assert.match(renderer, /api\.inspectAttachments\(paths\)/u);
+  assert.match(renderer, /if \(session\.goal\) \{\s*await activateExistingGoal\(session\)/su);
   assert.match(renderer, /setAttribute\('role', 'switch'\)/u);
   assert.match(renderer, /setAttribute\('aria-describedby', state\.id\)/u);
   assert.match(renderer, /pendingSwitchFocusThreadId/u);

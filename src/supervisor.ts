@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { validateAttachmentPaths } from './attachments.js';
 import { AppError, errorMessage } from './errors.js';
 import { currentGitSnapshot } from './git.js';
 import { sanitizeLog, type Logger } from './log.js';
@@ -9,6 +10,7 @@ import type { CodexDesktopClient, GoalInfo, GoalStatus, NativeGoalResult, TurnRe
 export interface SuperviseOptions {
   resume: boolean;
   adopting?: boolean;
+  adoptingGoalMissing?: boolean;
   signal: AbortSignal;
 }
 
@@ -82,12 +84,68 @@ function assertOwnedGoal(state: RunState, goal: GoalInfo): void {
     && (goal.createdAt !== state.nativeGoalCreatedAt || goal.tokenBudget !== state.goalTokenBudget);
   const requestedBudgetMismatch = state.nativeGoalCreatedAt === null && state.tokenBudget !== null
     && goal.tokenBudget !== state.tokenBudget;
-  if (goal.objective !== state.objective || identityMismatch || requestedBudgetMismatch) {
+  if (goal.objective !== state.goalObjective || identityMismatch || requestedBudgetMismatch) {
     throw new AppError(
       'GOAL_OWNERSHIP_MISMATCH',
       'El Goal persistido cambio de objetivo o presupuesto fuera de esta corrida; no se modificara.',
     );
   }
+}
+
+export function initialContextText(state: Pick<RunState, 'objective' | 'attachments'>): string {
+  const files = state.attachments.length === 0
+    ? 'Ninguno.'
+    : state.attachments.map((attachment) => `- ${JSON.stringify(attachment)}`).join('\n');
+  return [
+    'CONTEXTO INICIAL AUTORITATIVO DE CODEX INFINITE',
+    '',
+    'OBJETIVO COMPLETO',
+    state.objective,
+    '',
+    'ARCHIVOS ADJUNTOS',
+    files,
+    '',
+    'Las rutas son absolutas. Lee cada archivo necesario con las herramientas del sistema antes de completar el objetivo.',
+  ].join('\n');
+}
+
+async function injectInitialContext(client: CodexDesktopClient, state: RunState): Promise<void> {
+  if (state.contextInjectionStatus === 'notRequired' || state.contextInjectionStatus === 'injected') return;
+  if (state.contextInjectionStatus === 'pending') {
+    throw new AppError(
+      'CONTEXT_INJECTION_UNCERTAIN',
+      'No se puede demostrar si el contexto inicial ya fue inyectado; no se repetira automaticamente.',
+    );
+  }
+  if (state.attachments.length > 0) {
+    const current = await validateAttachmentPaths(state.attachments);
+    if (current.length !== state.attachments.length || current.some((entry, index) => entry !== state.attachments[index])) {
+      throw new AppError('INVALID_ATTACHMENT', 'Los archivos adjuntos cambiaron mientras la sesion estaba ocupada; vuelve a seleccionarlos.');
+    }
+  }
+  state.contextInjectionStatus = 'pending';
+  await saveRun(state);
+  await appendRunEvent(state.runId, 'context_injection_intent', {
+    threadId: state.threadId,
+    attachmentCount: state.attachments.length,
+    objectiveCharacters: state.objective.length,
+  });
+  try {
+    await client.injectText(state.threadId!, initialContextText(state));
+  } catch (cause) {
+    throw new AppError(
+      'CONTEXT_INJECTION_UNCERTAIN',
+      'No se pudo confirmar la inyeccion unica del contexto inicial; no se reintentara automaticamente.',
+      1,
+      { cause },
+    );
+  }
+  state.contextInjectionStatus = 'injected';
+  await saveRun(state);
+  await appendRunEvent(state.runId, 'context_injected', {
+    threadId: state.threadId,
+    attachmentCount: state.attachments.length,
+  });
 }
 
 function captureGoalIdentity(state: RunState, goal: GoalInfo): void {
@@ -730,6 +788,9 @@ async function verifyCompletedGoal(
 export async function supervise(client: CodexDesktopClient, state: RunState, logger: Logger, options: SuperviseOptions): Promise<RunState> {
   let activationAttempted = false;
   let adoptionPolicyConfigured = false;
+  const adoptionGoalMatches = (goal: GoalInfo | null): boolean => options.adoptingGoalMissing
+    ? goal === null
+    : goal?.status === 'paused';
   const configureManagedThread = async (): Promise<void> => {
     await client.configureThread({
       threadId: state.threadId!,
@@ -761,10 +822,10 @@ export async function supervise(client: CodexDesktopClient, state: RunState, log
         throw new AppError('REMOTE_STATE_UNCERTAIN', 'La sesion dejo de estar inactiva antes de activar el modo continuo.');
       }
       const ownedGoal = await client.getGoal(state.threadId!);
-      if (!ownedGoal || ownedGoal.status !== 'paused') {
+      if (!adoptionGoalMatches(ownedGoal)) {
         throw new AppError('GOAL_OWNERSHIP_MISMATCH', 'El Goal cambio antes de activar el modo continuo.');
       }
-      captureGoalIdentity(state, ownedGoal);
+      if (ownedGoal) captureGoalIdentity(state, ownedGoal);
       if (options.signal.aborted) throw new AppError('INTERRUPTED', 'Activacion interrumpida antes de modificar el Goal.', 130);
       const preconfigureSnapshot = await client.readThread(state.threadId!);
       if (threadIsActive(preconfigureSnapshot.status)) {
@@ -797,12 +858,19 @@ export async function supervise(client: CodexDesktopClient, state: RunState, log
         await restoreAdoptionPolicy();
         throw new AppError('REMOTE_STATE_UNCERTAIN', 'La sesion dejo de estar inactiva antes de activar el modo continuo.');
       }
+      const preInjectionGoal = await client.getGoal(state.threadId!);
+      if (!adoptionGoalMatches(preInjectionGoal)) {
+        await restoreAdoptionPolicy();
+        throw new AppError('GOAL_OWNERSHIP_MISMATCH', 'El Goal cambio antes de inyectar el contexto inicial.');
+      }
+      if (preInjectionGoal) captureGoalIdentity(state, preInjectionGoal);
+      await injectInitialContext(client, state);
       const activationGoal = await client.getGoal(state.threadId!);
-      if (!activationGoal || activationGoal.status !== 'paused') {
+      if (!adoptionGoalMatches(activationGoal)) {
         await restoreAdoptionPolicy();
         throw new AppError('GOAL_OWNERSHIP_MISMATCH', 'El Goal cambio antes de activar el modo continuo.');
       }
-      captureGoalIdentity(state, activationGoal);
+      if (activationGoal) captureGoalIdentity(state, activationGoal);
       const activationSnapshot = await client.readThread(state.threadId!);
       if (threadIsActive(activationSnapshot.status)) {
         await restoreAdoptionPolicy();
@@ -877,7 +945,7 @@ export async function supervise(client: CodexDesktopClient, state: RunState, log
         await persistStatus(state, 'blocked', 'El thread tiene actividad sin evidencia suficiente de propiedad; no se modifico.');
         return state;
       }
-      if (!existingGoal && hasPriorGoalEvidence) {
+      if (!existingGoal && hasPriorGoalEvidence && !options.adoptingGoalMissing) {
         await persistStatus(state, 'blocked', 'El Goal durable desaparecio despues de haber iniciado; no se creara otro automaticamente.');
         return state;
       }
@@ -899,13 +967,13 @@ export async function supervise(client: CodexDesktopClient, state: RunState, log
       }
       if (options.adopting) {
         existingGoal = await client.getGoal(state.threadId);
-        if (!existingGoal || existingGoal.status !== 'paused') {
+        if (!adoptionGoalMatches(existingGoal)) {
           client.releaseThreadOwnership(state.threadId);
           await persistStatus(state, 'blocked', 'El Goal cambio durante la adopcion; no se modifico ni se interrumpio el turno manual.');
           return state;
         }
         try {
-          captureGoalIdentity(state, existingGoal);
+          if (existingGoal) captureGoalIdentity(state, existingGoal);
         } catch (error) {
           client.releaseThreadOwnership(state.threadId);
           await persistStatus(state, 'blocked', errorMessage(error));
@@ -1001,7 +1069,13 @@ export async function supervise(client: CodexDesktopClient, state: RunState, log
         captureGoalIdentity(state, existingGoal);
       }
       const reconciliationIssue = options.adopting
-        ? await reconcileAdoptionTurns(client, state, activationWasPending, goalWasMissing, options.signal)
+        ? await reconcileAdoptionTurns(
+          client,
+          state,
+          activationWasPending,
+          goalWasMissing && !options.adoptingGoalMissing,
+          options.signal,
+        )
         : await reconcileTurns(client, state, activationWasPending, goalWasMissing);
       if (reconciliationIssue) {
         if (options.adopting) throw new AppError('ADOPTION_RECONCILIATION_FAILED', reconciliationIssue);
@@ -1023,7 +1097,7 @@ export async function supervise(client: CodexDesktopClient, state: RunState, log
 
     let goal = await client.getGoal(state.threadId!);
     if (goal) await updateGoalSnapshot(state, goal);
-    if (options.adopting && (!goal || goal.status !== 'paused')) {
+    if (options.adopting && !adoptionGoalMatches(goal)) {
       throw new AppError('GOAL_OWNERSHIP_MISMATCH', 'El Goal cambio antes de activar el modo continuo.');
     }
     if (goal?.status === 'usageLimited' && !options.resume) {
@@ -1060,14 +1134,14 @@ export async function supervise(client: CodexDesktopClient, state: RunState, log
           client,
           state,
           options.signal,
-          initialObjectiveRequired ? state.objective : undefined,
+          initialObjectiveRequired ? state.goalObjective : undefined,
           options.adopting && !activationAttempted ? {
             beforeActivation: prepareAdoptionActivation,
             onActivationAttempt: () => {
               activationAttempted = true;
               adoptionPolicyConfigured = false;
             },
-          } : {},
+          } : { beforeActivation: async () => injectInitialContext(client, state) },
         );
         initialObjectiveRequired = false;
         state.goalActivationPending = false;

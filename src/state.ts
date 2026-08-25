@@ -15,6 +15,13 @@ export function staleWorkspaceLockMustQuarantine(platform: NodeJS.Platform): boo
 }
 
 export type RunStatus = 'initializing' | 'running' | 'verifying' | 'paused' | 'blocked' | 'budgetLimited' | 'completed' | 'failed';
+export type ContextInjectionStatus = 'notRequired' | 'required' | 'pending' | 'injected';
+
+export const CONTEXT_GOAL_OBJECTIVE = [
+  'Completa el objetivo autoritativo inyectado inmediatamente antes de activar este Goal.',
+  'Ese contexto contiene el objetivo completo y, cuando aplica, las rutas absolutas de los archivos adjuntos.',
+  'Lee los archivos con las herramientas del sistema, verifica el resultado y no marques el Goal como completo hasta terminar todo el alcance.',
+].join(' ');
 
 export interface VerificationRecord {
   ok: boolean;
@@ -49,6 +56,9 @@ export interface RunState {
   acknowledgedBlockingTurnIds: string[];
   workspace: string;
   objective: string;
+  goalObjective: string;
+  attachments: string[];
+  contextInjectionStatus: ContextInjectionStatus;
   name: string;
   status: RunStatus;
   createdAt: string;
@@ -145,6 +155,9 @@ function validateState(value: unknown): asserts value is RunState {
       : null;
   }
   if (item.acknowledgedBlockingTurnIds === undefined) item.acknowledgedBlockingTurnIds = [];
+  if (item.goalObjective === undefined) item.goalObjective = item.objective;
+  if (item.attachments === undefined) item.attachments = [];
+  if (item.contextInjectionStatus === undefined) item.contextInjectionStatus = 'notRequired';
   const statuses = new Set<RunStatus>(['initializing', 'running', 'verifying', 'paused', 'blocked', 'budgetLimited', 'completed', 'failed']);
   const goalStatuses = new Set<GoalStatus>(['active', 'paused', 'blocked', 'usageLimited', 'budgetLimited', 'complete']);
   const turnStatuses = new Set<TurnStatus>(['completed', 'interrupted', 'failed', 'inProgress']);
@@ -187,8 +200,20 @@ function validateState(value: unknown): asserts value is RunState {
     && item.gitFinal !== null
   );
   const workspace = typeof item.workspace === 'string' ? item.workspace : '';
+  const contextStatuses = new Set<ContextInjectionStatus>(['notRequired', 'required', 'pending', 'injected']);
+  const contextRequired = typeof item.objective === 'string' && Array.isArray(item.attachments)
+    && (item.objective.length > 4000 || item.attachments.length > 0);
   if (item.schemaVersion !== 2 || !validRunId(item.runId) || !path.isAbsolute(workspace)
-    || typeof item.objective !== 'string' || item.objective.length < 1 || item.objective.length > 4000
+    || typeof item.objective !== 'string' || item.objective.length < 1
+    || typeof item.goalObjective !== 'string' || item.goalObjective.length < 1 || item.goalObjective.length > 4000
+    || !Array.isArray(item.attachments) || item.attachments.length > 100
+    || !item.attachments.every((entry) => typeof entry === 'string' && entry.length > 0 && entry.length <= 32_767
+      && path.isAbsolute(entry) && !/[\x00-\x1f\x7f]/u.test(entry))
+    || new Set(item.attachments.map((entry) => process.platform === 'win32' ? entry.toLowerCase() : entry)).size !== item.attachments.length
+    || typeof item.contextInjectionStatus !== 'string' || !contextStatuses.has(item.contextInjectionStatus as ContextInjectionStatus)
+    || (contextRequired
+      ? item.goalObjective !== CONTEXT_GOAL_OBJECTIVE || item.contextInjectionStatus === 'notRequired'
+      : item.goalObjective !== item.objective || item.contextInjectionStatus !== 'notRequired')
     || typeof item.name !== 'string' || item.name.length < 1 || item.name.length > 128
     || typeof item.status !== 'string' || !statuses.has(item.status as RunStatus)
     || !nullableString(item.threadId, 128) || !nullableString(item.activeTurnId, 128)
@@ -217,8 +242,10 @@ function validateState(value: unknown): asserts value is RunState {
   }
 }
 
-export function createRunState(input: Omit<RunState, 'schemaVersion' | 'runId' | 'threadId' | 'activeTurnId' | 'goalActivationPending' | 'nativeGoalStatus' | 'nativeGoalCreatedAt' | 'goalTokenBudget' | 'observedTurnIds' | 'acknowledgedBlockingTurnIds' | 'status' | 'createdAt' | 'updatedAt' | 'startedAt' | 'completedAt' | 'turnCount' | 'totalTokens' | 'verificationAttempts' | 'gitFinal' | 'lastTurn' | 'blockingEvidence' | 'lastVerification' | 'lastError'>): RunState {
+export function createRunState(input: Omit<RunState, 'schemaVersion' | 'runId' | 'threadId' | 'activeTurnId' | 'goalActivationPending' | 'nativeGoalStatus' | 'nativeGoalCreatedAt' | 'goalTokenBudget' | 'goalObjective' | 'attachments' | 'contextInjectionStatus' | 'observedTurnIds' | 'acknowledgedBlockingTurnIds' | 'status' | 'createdAt' | 'updatedAt' | 'startedAt' | 'completedAt' | 'turnCount' | 'totalTokens' | 'verificationAttempts' | 'gitFinal' | 'lastTurn' | 'blockingEvidence' | 'lastVerification' | 'lastError'> & { attachments?: string[] }): RunState {
   const now = new Date().toISOString();
+  const attachments = input.attachments ?? [];
+  const contextRequired = input.objective.length > 4000 || attachments.length > 0;
   return {
     schemaVersion: 2,
     runId: randomUUID(),
@@ -230,6 +257,8 @@ export function createRunState(input: Omit<RunState, 'schemaVersion' | 'runId' |
     goalTokenBudget: input.tokenBudget,
     observedTurnIds: [],
     acknowledgedBlockingTurnIds: [],
+    goalObjective: contextRequired ? CONTEXT_GOAL_OBJECTIVE : input.objective,
+    contextInjectionStatus: contextRequired ? 'required' : 'notRequired',
     status: 'initializing',
     createdAt: now,
     updatedAt: now,
@@ -244,6 +273,7 @@ export function createRunState(input: Omit<RunState, 'schemaVersion' | 'runId' |
     lastVerification: null,
     lastError: null,
     ...input,
+    attachments,
   };
 }
 

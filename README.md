@@ -30,13 +30,19 @@ npm install
 npm start
 ```
 
-La aplicación comprueba Desktop y la sesión, permite elegir el workspace, crear o reanudar Goals, pausarlos, revisar su progreso durable y consultar los threads compartidos. Al reanudar, red, acceso total y comandos de verificación vuelven a valores seguros y deben autorizarse otra vez en el diálogo.
+La aplicación comprueba Desktop y la sesión, permite elegir el workspace, crear o reanudar Goals, adjuntar archivos, pausarlos, revisar su progreso durable y consultar los threads compartidos. El editor no recorta el objetivo. Al reanudar, red, acceso total y comandos de verificación vuelven a valores seguros y deben autorizarse otra vez en el diálogo.
 
 ### Sesiones activas
 
-La pestaña **Sesiones** muestra los threads persistidos de Codex Desktop junto con su estado de runtime, Goal y supervisor local. El interruptor **Continuar hasta terminar** permite adoptar un thread elegible con un Goal ya pausado, después de confirmar el workspace y el objetivo. Si hay un turno manual activo, el companion solo lo observa y espera su estado `idle`; no activa el Goal ni envía mensajes por temporizador. Solo puede pausar una ejecución que esta instancia haya adoptado.
+La pestaña **Sesiones** muestra los threads persistidos de Codex Desktop junto con su estado de runtime, Goal y supervisor local. El interruptor **Continuar hasta terminar** activa directamente un Goal pausado. Si el thread todavía no tiene Goal, abre **Coloca el objetivo para activar** para escribir el objetivo y, si hace falta, adjuntar archivos. Si hay un turno manual activo, el companion solo lo observa y espera su estado `idle`; no activa el Goal ni envía mensajes por temporizador. Solo puede pausar una ejecución que esta instancia haya adoptado.
 
-Los threads sin Goal pausado, con un Goal activo ajeno, sin workspace válido o con estado incompatible se muestran como no disponibles y explican el motivo. El App Server no ofrece una operación condicional para crear un Goal solo si aún no existe, así que el companion falla cerrado en vez de arriesgarse a sobrescribir uno creado en paralelo. La actualización combina eventos del App Server con reconciliación de estado para evitar duplicar trabajo ante eventos perdidos.
+Los threads con un Goal activo ajeno, sin workspace válido o con estado incompatible se muestran como no disponibles y explican el motivo. Al crear un Goal faltante, el companion vuelve a comprobar thread y Goal inmediatamente antes de inyectar contexto y activarlo, y falla cerrado si detecta una carrera. El App Server no ofrece una creación condicional atómica, por lo que queda una ventana mínima inevitable entre la última lectura y `thread/goal/set`; no actives el mismo thread desde otra ventana al mismo tiempo. La actualización combina eventos del App Server con reconciliación de estado para evitar duplicar trabajo ante eventos perdidos.
+
+### Objetivos y archivos
+
+El objetivo no tiene un límite artificial en la aplicación. Como el campo `objective` del Goal nativo admite hasta 4000 caracteres, un objetivo más largo se conserva completo en el estado durable y se inyecta una sola vez en el historial antes de activar un Goal corto que apunta a ese contexto. Un estado de inyección ambiguo queda bloqueado y nunca se reintenta a ciegas.
+
+El selector y la zona de arrastre admiten hasta 100 archivos locales por objetivo. Las rutas se resuelven de forma canónica, se deduplican y se comprueba que cada destino sea un archivo regular legible. Codex recibe una sola vez las rutas absolutas para leerlas con sus herramientas; este mecanismo no inicia un turno adicional ni envía continuaciones por intervalo.
 
 ## CLI avanzada
 
@@ -83,7 +89,7 @@ Opciones principales de `run`:
 | `--danger-full-access` | Sandbox `workspace-write` hasta habilitarlo explícitamente. |
 | `--bin ruta` | Override avanzado, restringido a una ruta dentro del bundle de Desktop. |
 
-El texto del Goal debe tener entre 1 y 4000 caracteres.
+El objetivo debe contener al menos un carácter visible. No existe un máximo artificial del companion; los objetivos que superan el límite nativo se manejan como se describe en **Objetivos y archivos**.
 
 `--verify` ejecuta secuencialmente cada comando suministrado por el usuario mediante el shell del host y fuera del sandbox de Codex. Comparten un máximo de 15 minutos o el tiempo restante de la corrida. El entorno usa rutas de sistema confiables y excluye el workspace al resolver herramientas; indica una ruta absoluta para otra herramienta confiable. No copies comandos de un repositorio no confiable.
 
@@ -103,7 +109,7 @@ Por seguridad, `resume` exige ejecutarse desde la raíz Git original (o recibirl
 - En Windows ejecuta App Server, Git y verificadores dentro de un Job protegido por un wrapper fijado por hash; el cierre cooperativo y la muerte del supervisor drenan también procesos descendientes.
 - En macOS y Linux usa grupos de procesos con `SIGTERM`/`SIGKILL` y confirma su drenaje durante un cierre normal. El sistema operativo no garantiza que el grupo se drene si el supervisor recibe `SIGKILL` o sufre un crash duro.
 - Tras un crash, pausa un Goal huérfano antes de reanudarlo y reconcilia el último turno persistido. Si su resultado es ambiguo, queda bloqueado en vez de duplicar acciones.
-- Deja que la extensión Goal nativa provea `update_goal`, incluida su contabilidad de progreso; el supervisor nunca la reemplaza ni combina Goal nativo con `turn/start`.
+- Deja que la extensión Goal nativa provea `update_goal`, incluida su contabilidad de progreso; el supervisor nunca la reemplaza ni combina Goal nativo con `turn/start`. El contexto inicial largo o con archivos usa `thread/inject_items`, que persiste contexto sin iniciar generación.
 - Si falla una verificación, inyecta diagnóstico acotado en el historial y reactiva el mismo Goal sin reemplazar el objetivo ni reiniciar su consumo.
 - Refleja `active`, `paused`, `blocked`, `budgetLimited`, `usageLimited` y `complete` en el Goal nativo de Desktop.
 

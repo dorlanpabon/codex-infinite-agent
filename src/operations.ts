@@ -3,6 +3,7 @@ import path from 'node:path';
 import { CodexDesktopClient, type GoalInfo, type ThreadInfo } from './app-server/client.js';
 import { discoverCodexBinary, type BinaryInfo } from './app-server/binary.js';
 import { JsonRpcProcess } from './app-server/rpc.js';
+import { validateAttachmentPaths } from './attachments.js';
 import { AppError, errorMessage } from './errors.js';
 import { resolveGitWorkspace } from './git.js';
 import { sanitizeLog, type Logger } from './log.js';
@@ -20,8 +21,11 @@ import type { DesktopSessionInfo } from './desktop/contracts.js';
 
 const EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'ultra']);
 
+export { validateAttachmentPaths } from './attachments.js';
+
 export interface StartGoalOptions {
   objective: string;
+  attachments?: string[];
   directory: string;
   name?: string | null;
   maxTurns?: number;
@@ -184,7 +188,7 @@ export async function startGoal(
   hooks?: OperationHooks,
 ): Promise<RunState> {
   const objective = options.objective.trim();
-  if (!objective || objective.length > 4000) throw new AppError('INVALID_OBJECTIVE', 'El objetivo debe tener entre 1 y 4000 caracteres.');
+  if (!objective) throw new AppError('INVALID_OBJECTIVE', 'El objetivo no puede estar vacio.');
   if (options.model && options.model.length > 256) throw new AppError('INVALID_ARGUMENT', 'El modelo no puede exceder 256 caracteres.');
   if (options.effort && !EFFORTS.has(options.effort)) throw new AppError('INVALID_ARGUMENT', 'Nivel de esfuerzo invalido.');
   const baseline = await resolveGitWorkspace(options.directory, 120_000, signal);
@@ -192,10 +196,12 @@ export async function startGoal(
   const name = options.name?.trim() || `Infinite: ${objective.replace(/\s+/g, ' ').slice(0, 72)}`;
   if (name.length > 128) throw new AppError('INVALID_ARGUMENT', 'El nombre no puede exceder 128 caracteres.');
   const tokenBudget = options.tokenBudget ?? null;
+  const attachments = await validateAttachmentPaths(options.attachments ?? []);
   if (tokenBudget !== null) positiveNumber(tokenBudget, 0, 'tokenBudget', true, 2_000_000_000);
   const state = createRunState({
     workspace: baseline.root,
     objective,
+    attachments,
     name,
     maxTurns: positiveNumber(options.maxTurns, 30, 'maxTurns', true, 1000),
     turnTimeoutMs: positiveNumber(options.turnMinutes, 45, 'turnMinutes', false, 1440) * 60_000,
@@ -240,9 +246,7 @@ export async function attachGoal(
   hooks?: OperationHooks,
 ): Promise<RunState> {
   const requestedObjective = options.objective.trim();
-  if (!requestedObjective || requestedObjective.length > 4000) {
-    throw new AppError('INVALID_OBJECTIVE', 'El objetivo debe tener entre 1 y 4000 caracteres.');
-  }
+  if (!requestedObjective) throw new AppError('INVALID_OBJECTIVE', 'El objetivo no puede estar vacio.');
   if (!options.threadId || options.threadId.length > 128) throw new AppError('INVALID_ARGUMENT', 'Thread ID invalido.');
   if (options.model && options.model.length > 256) throw new AppError('INVALID_ARGUMENT', 'El modelo no puede exceder 256 caracteres.');
   if (options.effort && !EFFORTS.has(options.effort)) throw new AppError('INVALID_ARGUMENT', 'Nivel de esfuerzo invalido.');
@@ -265,26 +269,26 @@ export async function attachGoal(
     }
 
     const remoteGoal = await client.getGoal(thread.id);
-    if (!attachableGoal(remoteGoal)) {
+    if (remoteGoal !== null && !attachableGoal(remoteGoal)) {
       throw new AppError(
         'GOAL_NOT_ATTACHABLE',
-        remoteGoal === null
-          ? 'La sesion no tiene un Goal pausado preexistente; no se creara uno sin una operacion atomica.'
-          : `El Goal remoto esta ${remoteGoal.status} y no se reemplazara.`,
+        `El Goal remoto esta ${remoteGoal.status} y no se reemplazara.`,
       );
     }
     const baseline = await resolveGitWorkspace(thread.cwd, 120_000, signal);
     const dangerFullAccess = options.dangerFullAccess === true;
-    const objective = remoteGoal.objective;
+    const objective = remoteGoal?.objective ?? requestedObjective;
+    const attachments = remoteGoal ? [] : await validateAttachmentPaths(options.attachments ?? []);
     const name = options.name?.trim() || thread.name?.trim() || `Infinite: ${objective.replace(/\s+/g, ' ').slice(0, 72)}`;
     if (name.length > 128) throw new AppError('INVALID_ARGUMENT', 'El nombre no puede exceder 128 caracteres.');
     const requestedTurns = positiveNumber(options.maxTurns, 30, 'maxTurns', true, 1000);
-    const requestedTokenBudget = remoteGoal.tokenBudget ?? options.tokenBudget ?? null;
+    const requestedTokenBudget = remoteGoal?.tokenBudget ?? options.tokenBudget ?? null;
     if (requestedTokenBudget !== null) positiveNumber(requestedTokenBudget, 0, 'tokenBudget', true, 2_000_000_000);
 
     state = createRunState({
       workspace: baseline.root,
       objective,
+      attachments,
       name,
       maxTurns: requestedTurns,
       turnTimeoutMs: positiveNumber(options.turnMinutes, 45, 'turnMinutes', false, 1440) * 60_000,
@@ -298,10 +302,10 @@ export async function attachGoal(
       gitBaseline: baseline,
     });
     state.threadId = thread.id;
-    state.nativeGoalStatus = remoteGoal.status;
-    state.nativeGoalCreatedAt = remoteGoal.createdAt;
-    state.goalTokenBudget = remoteGoal.tokenBudget;
-    state.totalTokens = remoteGoal.tokensUsed;
+    state.nativeGoalStatus = remoteGoal?.status ?? null;
+    state.nativeGoalCreatedAt = remoteGoal?.createdAt ?? null;
+    state.goalTokenBudget = remoteGoal?.tokenBudget ?? requestedTokenBudget;
+    state.totalTokens = remoteGoal?.tokensUsed ?? 0;
     lock = await acquireWorkspaceLock(state.workspace, state.runId);
     await saveRun(state);
     notify(hooks, state, logger);
@@ -320,8 +324,11 @@ export async function attachGoal(
     if (signal.aborted) throw new AppError('INTERRUPTED', 'Activacion interrumpida antes de modificar el Goal.', 130);
 
     const currentGoal = await client.getGoal(thread.id);
-    if (!currentGoal || currentGoal.createdAt !== remoteGoal.createdAt
-      || currentGoal.objective !== remoteGoal.objective || currentGoal.status !== 'paused') {
+    const goalChanged = remoteGoal
+      ? !currentGoal || currentGoal.createdAt !== remoteGoal.createdAt
+        || currentGoal.objective !== remoteGoal.objective || currentGoal.status !== 'paused'
+      : currentGoal !== null;
+    if (goalChanged) {
       throw new AppError('GOAL_OWNERSHIP_MISMATCH', 'El Goal cambio mientras se esperaba el turno activo; no se modificara.');
     }
 
@@ -337,7 +344,12 @@ export async function attachGoal(
     await saveRun(state);
     notify(hooks, state, logger);
     supervisionStarted = true;
-    finalState = await supervise(client, state, logger, { resume: true, adopting: true, signal });
+    finalState = await supervise(client, state, logger, {
+      resume: true,
+      adopting: true,
+      adoptingGoalMissing: remoteGoal === null,
+      signal,
+    });
     notify(hooks, finalState, logger);
   } catch (error) {
     runError = error;
@@ -444,17 +456,15 @@ export async function listDesktopSessions(
       if (goalError) unavailableReason = 'No se pudo confirmar el Goal remoto.';
       else if (!attachableThread(thread)) unavailableReason = 'Solo se pueden administrar sesiones interactivas persistidas.';
       else if (workspaceOwner && workspaceOwner !== localRun?.runId) unavailableReason = 'Otro objetivo ya administra este workspace.';
-      else if (!localRun && !attachableGoal(goal)) {
-        unavailableReason = goal === null
-          ? 'La sesion necesita un Goal pausado preexistente.'
-          : goal.status === 'active'
+      else if (!localRun && goal !== null && !attachableGoal(goal)) {
+        unavailableReason = goal.status === 'active'
           ? 'Este Goal esta activo fuera de esta instancia.'
           : `El Goal remoto esta ${goal.status}.`;
       } else if (localRun?.status === 'completed') unavailableReason = 'La ejecucion local ya esta completa.';
 
       const canDisable = operationActive;
       const canEnable = !operationActive && unavailableReason === null
-        && (localRun !== null || attachableGoal(goal));
+        && (localRun !== null || goal === null || attachableGoal(goal));
       return {
         thread,
         goal,

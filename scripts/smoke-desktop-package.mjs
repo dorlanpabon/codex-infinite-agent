@@ -69,7 +69,7 @@ try {
     await attachableSession.click();
     assert.equal(await window.locator('#goal-dialog').evaluate((dialog) => dialog.open), true);
     assert.equal(await window.locator('#goal-thread-row').isVisible(), true);
-    assert.equal(await window.locator('#goal-dialog-title').innerText(), 'Activar modo continuo');
+    assert.equal(await window.locator('#goal-dialog-title').innerText(), 'Coloca el objetivo para activar');
     assert.match(await window.locator('#dialog-footer-copy').innerText(), /No se enviarán mensajes/iu);
     await window.screenshot({ path: path.join(qaDirectory, 'desktop-attach-dialog.png') });
     await window.locator('#dialog-close-button').click();

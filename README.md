@@ -17,7 +17,7 @@ La [página de releases](https://github.com/dorlanpabon/codex-infinite-agent/rel
 | Debian/Ubuntu | x64 y arm64 | `Codex-Infinite-<version>-linux-<arch>.deb` |
 | Fedora/RHEL | x64 y arm64 | `Codex-Infinite-<version>-linux-<arch>.rpm` |
 
-La versión `0.4.0` se distribuye como preview sin certificado comercial de Windows ni notarización de Apple. SmartScreen o Gatekeeper pueden mostrar una advertencia. Comprueba siempre el archivo `SHA256SUMS.txt` de la release antes de instalar y no aceptes un binario obtenido fuera de GitHub Releases.
+La versión estable `0.5.0` se distribuye sin certificado comercial de Windows ni firma o notarización de Apple. SmartScreen o Gatekeeper pueden mostrar una advertencia. Comprueba siempre el archivo `SHA256SUMS.txt` de la release antes de instalar y no aceptes un binario obtenido fuera de GitHub Releases.
 
 El companion requiere que Codex Desktop esté instalado y que la sesión de ChatGPT esté iniciada. No incluye, copia ni solicita credenciales de OpenAI.
 
@@ -34,7 +34,7 @@ La aplicación comprueba Desktop y la sesión, permite elegir el workspace, crea
 
 ### Sesiones activas
 
-La pestaña **Sesiones** muestra los threads persistidos de Codex Desktop junto con su estado de runtime, Goal y supervisor local. El interruptor **Continuar hasta terminar** activa directamente un Goal pausado. Si el thread todavía no tiene Goal, abre **Coloca el objetivo para activar** para escribir el objetivo y, si hace falta, adjuntar archivos. Si hay un turno manual activo, el companion solo lo observa y espera su estado `idle`; no activa el Goal ni envía mensajes por temporizador. Solo puede pausar una ejecución que esta instancia haya adoptado.
+La pestaña **Sesiones** muestra los threads persistidos de Codex Desktop junto con su estado de runtime, Goal y supervisor local. **Abrir en Codex** lleva directamente al thread mediante el enlace local de Codex Desktop. El interruptor **Continuar hasta terminar** activa directamente un Goal pausado. Si el thread todavía no tiene Goal, abre **Coloca el objetivo para activar** para escribir el objetivo y, si hace falta, adjuntar archivos. Si hay un turno manual activo, el companion solo lo observa y espera su estado `idle`; no activa el Goal ni envía mensajes por temporizador. Solo puede pausar una ejecución que esta instancia haya adoptado.
 
 Los threads con un Goal activo ajeno, sin workspace válido o con estado incompatible se muestran como no disponibles y explican el motivo. Al crear un Goal faltante, el companion vuelve a comprobar thread y Goal inmediatamente antes de inyectar contexto y activarlo, y falla cerrado si detecta una carrera. El App Server no ofrece una creación condicional atómica, por lo que queda una ventana mínima inevitable entre la última lectura y `thread/goal/set`; no actives el mismo thread desde otra ventana al mismo tiempo. La actualización combina eventos del App Server con reconciliación de estado para evitar duplicar trabajo ante eventos perdidos.
 
@@ -91,6 +91,8 @@ Opciones principales de `run`:
 
 El objetivo debe contener al menos un carácter visible. No existe un máximo artificial del companion; los objetivos que superan el límite nativo se manejan como se describe en **Objetivos y archivos**.
 
+Crear commits requiere autorizar `--danger-full-access` de forma explícita. El sandbox `workspaceWrite` puede modificar archivos del proyecto, pero no permite escribir dentro de `.git`; no concedas acceso total si el objetivo no necesita operaciones Git.
+
 `--verify` ejecuta secuencialmente cada comando suministrado por el usuario mediante el shell del host y fuera del sandbox de Codex. Comparten un máximo de 15 minutos o el tiempo restante de la corrida. El entorno usa rutas de sistema confiables y excluye el workspace al resolver herramientas; indica una ruta absoluta para otra herramienta confiable. No copies comandos de un repositorio no confiable.
 
 Sin `--verify`, únicamente se ejecutan `git diff --check` y `git diff --cached --check`. Eso no compila, no corre tests, no cubre archivos untracked y no exige árbol limpio, commit ni push; añade checks explícitos para los criterios reales del proyecto.
@@ -131,7 +133,7 @@ Si no puede confirmarse el cierre de un proceso o del estado remoto, el lock que
 - macOS Apple Silicon: bundle firmado en `/Applications/ChatGPT.app`; cierre normal mediante grupo de procesos.
 - Linux x64/arm64: paquete oficial instalado en `/usr/lib/chatgpt`; cierre normal mediante grupo de procesos.
 
-Las operaciones Goal requieren `experimentalApi` del App Server y pueden cambiar entre versiones de Desktop. `doctor` valida transporte y autenticación, no la ejecución completa de `thread/goal/*`. La CI multiplataforma usa mocks y empaqueta la interfaz, pero no sustituye un smoke autenticado de Desktop. La preview `0.4.0` aún requiere, con cuota disponible, un smoke autenticado que confirme la ejecución end-to-end de la herramienta Goal nativa `update_goal`; por eso no se presenta como una release estable. El paquete permanece privado para npm y se distribuye únicamente mediante instaladores de GitHub Releases.
+Las operaciones Goal requieren `experimentalApi` del App Server y pueden cambiar entre versiones de Desktop. `doctor` valida transporte y autenticación, no la ejecución completa de `thread/goal/*`. La CI multiplataforma usa mocks y empaqueta la interfaz, pero no sustituye un smoke autenticado de Desktop. El 25 de agosto de 2026 pasó un smoke real autenticado de extremo a extremo: el Goal nativo llegó a `update_goal complete`, creó el commit solicitado con el árbol Git limpio y superó los comandos `--verify`. El paquete permanece privado para npm y se distribuye únicamente mediante instaladores de GitHub Releases.
 
 ## Desarrollo
 

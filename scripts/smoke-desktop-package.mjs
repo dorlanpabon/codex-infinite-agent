@@ -43,7 +43,12 @@ try {
   await window.waitForLoadState('domcontentloaded');
   assert.equal(await window.title(), 'Codex Infinite');
   assert.equal(await window.url(), 'codex-infinite://app/index.html');
-  assert.equal(await window.locator('#inspect-open-codex-button').isHidden(), true);
+  const inspectorLinkState = await window.evaluate(() => ({
+    buttonHidden: document.querySelector('#inspect-open-codex-button')?.hidden,
+    runHidden: document.querySelector('#run-detail')?.hidden,
+    thread: document.querySelector('#run-thread')?.textContent,
+  }));
+  assert.equal(inspectorLinkState.buttonHidden, inspectorLinkState.runHidden || inspectorLinkState.thread === 'Pendiente');
   const system = await window.evaluate(() => window.codexInfinite.systemInfo());
   assert.deepEqual(
     { platform: system.platform, arch: system.arch },

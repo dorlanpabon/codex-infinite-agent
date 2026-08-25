@@ -47,6 +47,8 @@ test('desktop renderer modules and preload are included in the local protocol bu
   assert.match(renderer, /api\.listModels/u);
   assert.match(renderer, /model\.isDefault/u);
   assert.match(renderer, /preferredNewModel/u);
+  assert.match(renderer, /refreshModelsForConnectionChange/u);
+  assert.match(renderer, /if \(!modelSelectionManual && !attachSession\)/u);
   assert.match(renderer, /model:\s*ui\.modelInput\.value\.trim\(\)\s*\|\|\s*null/u);
   assert.match(renderer, /supportedReasoningEfforts/u);
   assert.match(renderer, /Catálogo no disponible/u);

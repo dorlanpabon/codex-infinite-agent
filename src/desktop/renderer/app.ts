@@ -203,6 +203,7 @@ let models: ModelInfo[] = [];
 let modelsRefreshInFlight: Promise<void> | null = null;
 let preferredNewModel: string | null = null;
 let preferredNewEffort: Effort | null = null;
+let modelSelectionManual = false;
 let sessions: DesktopSessionInfo[] = [];
 let sessionLogs: SessionLog[] = [];
 let pollInFlight = false;
@@ -874,6 +875,7 @@ function configureEfforts(preferred: Effort | null, selectNativeDefault: boolean
 }
 
 function selectModelDefaults(): void {
+  modelSelectionManual = true;
   const model = selectedModel();
   configureEfforts(null, model !== null);
   renderModelHelp();
@@ -881,6 +883,18 @@ function selectModelDefaults(): void {
     preferredNewModel = ui.modelInput.value.trim() || null;
     preferredNewEffort = effortValue(ui.effortInput.value);
   }
+}
+
+async function refreshModelsForConnectionChange(): Promise<void> {
+  if (modelsRefreshInFlight) await modelsRefreshInFlight;
+  models = [];
+  if (!modelSelectionManual && !attachSession) {
+    preferredNewModel = null;
+    preferredNewEffort = null;
+    ui.modelInput.value = '';
+    ui.effortInput.value = '';
+  }
+  await refreshModels(true);
 }
 
 function refreshModels(quiet = false): Promise<void> {
@@ -1153,6 +1167,7 @@ async function chooseWorkspace(): Promise<void> {
     const workspace = await api.chooseWorkspace();
     if (workspace) {
       ui.workspaceInput.value = workspace;
+      await refreshModelsForConnectionChange();
       announce('Workspace seleccionado.');
     }
   } catch (error) {
@@ -1169,6 +1184,7 @@ async function chooseBinary(): Promise<void> {
     if (binary) {
       chosenBinary = binary;
       ui.binaryInput.value = binary;
+      await refreshModelsForConnectionChange();
       announce('Binario seleccionado.');
     }
   } catch (error) {
@@ -1395,6 +1411,8 @@ function wireEvents(): () => void {
   ui.binaryPickerButton.addEventListener('click', () => { void chooseBinary(); });
   ui.modelsRefreshButton.addEventListener('click', () => { void refreshModels(); });
   ui.modelInput.addEventListener('input', selectModelDefaults);
+  ui.workspaceInput.addEventListener('change', () => { void refreshModelsForConnectionChange(); });
+  ui.binaryInput.addEventListener('change', () => { void refreshModelsForConnectionChange(); });
   ui.effortInput.addEventListener('change', () => {
     if (!attachSession) preferredNewEffort = effortValue(ui.effortInput.value);
   });

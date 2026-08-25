@@ -108,6 +108,7 @@ export interface DesktopApi {
   attachRun(input: AttachRunInput): Promise<OperationReceipt>;
   resumeRun(input: ResumeRunInput): Promise<OperationReceipt>;
   pauseRun(runId: string): Promise<OperationReceipt>;
+  openCodexThread(threadId: string): Promise<void>;
   listThreads(input: ThreadsInput): Promise<ThreadInfo[]>;
   listSessions(input: ThreadsInput): Promise<DesktopSessionInfo[]>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;
@@ -148,7 +149,8 @@ function runId(value: unknown): value is string {
 }
 
 function threadId(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= 128 && !/[\x00-\x1f\x7f]/u.test(value);
+  return typeof value === 'string'
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value);
 }
 
 export function parseStartRunInput(value: unknown): StartRunInput {
@@ -221,6 +223,10 @@ export function parseRunId(value: unknown): string {
 export function parseThreadId(value: unknown): string {
   if (!threadId(value)) throw new TypeError('Thread ID invalido.');
   return value;
+}
+
+export function codexThreadDeepLink(value: unknown): string {
+  return `codex://threads/${parseThreadId(value).toLowerCase()}`;
 }
 
 export function parseAttachmentPaths(value: unknown): string[] {

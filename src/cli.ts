@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { AppError, errorMessage } from './errors.js';
 import { createLogger, sanitizeLog } from './log.js';
@@ -14,7 +15,12 @@ import {
   terminalExitCode,
 } from './operations.js';
 
-const VERSION = '0.2.0';
+const packageMetadata = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as unknown;
+if (typeof packageMetadata !== 'object' || packageMetadata === null
+  || !('version' in packageMetadata) || typeof packageMetadata.version !== 'string') {
+  throw new Error('package.json no contiene una versión válida.');
+}
+const VERSION = packageMetadata.version;
 const EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'ultra']);
 
 interface ParsedArgs {

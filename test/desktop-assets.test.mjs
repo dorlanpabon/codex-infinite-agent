@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import test from 'node:test';
@@ -8,12 +8,12 @@ const root = path.resolve(import.meta.dirname, '..');
 const require = createRequire(import.meta.url);
 
 test('desktop renderer modules and preload are included in the local protocol build', async () => {
-  const [main, renderer, html, css] = await Promise.all([
+  const [main, renderer, html, css, preload] = await Promise.all([
     readFile(path.join(root, 'dist', 'desktop', 'main.js'), 'utf8'),
     readFile(path.join(root, 'dist', 'desktop', 'renderer', 'app.js'), 'utf8'),
     readFile(path.join(root, 'dist', 'desktop', 'renderer', 'index.html'), 'utf8'),
     readFile(path.join(root, 'dist', 'desktop', 'renderer', 'app.css'), 'utf8'),
-    access(path.join(root, 'dist', 'desktop', 'preload.cjs')),
+    readFile(path.join(root, 'dist', 'desktop', 'preload.cjs'), 'utf8'),
   ]);
   const imports = [...renderer.matchAll(/\bfrom\s+['"](\.[^'"]+)['"]/gu)].map((match) => match[1]);
   assert.ok(imports.length > 0);
@@ -28,6 +28,7 @@ test('desktop renderer modules and preload are included in the local protocol bu
   assert.match(html, /id="goal-thread"/u);
   assert.match(html, /id="attachment-dropzone"/u);
   assert.match(html, /id="attachment-picker-button"/u);
+  assert.match(html, /id="inspect-open-codex-button"[^>]*hidden/u);
   assert.doesNotMatch(html, /id="goal-objective"[^>]*maxlength=/u);
   assert.match(renderer, /Coloca el objetivo para activar/u);
   assert.match(renderer, /window\.setTimeout\(\(\) => ui\.objectiveInput\.focus\(\), 0\)/u);
@@ -39,11 +40,16 @@ test('desktop renderer modules and preload are included in the local protocol bu
   assert.match(renderer, /pendingSwitchFocusThreadId/u);
   assert.match(renderer, /sessionsPanel\.setAttribute\('aria-busy', 'true'\)/u);
   assert.match(renderer, /api\.listSessions/u);
+  assert.match(renderer, /api\.openCodexThread\(threadId\)/u);
+  assert.match(renderer, /session-open-button/u);
+  assert.match(renderer, /Abrir en Codex/u);
+  assert.match(renderer, /toast\(message, true\)/u);
   assert.match(renderer, /sessionsRefreshInFlight/u);
   assert.match(renderer, /generation !== sessionsRefreshGeneration/u);
   assert.match(renderer, /active: 'Activa'/u);
   assert.doesNotMatch(renderer, /Tareas Desktop/u);
   assert.match(css, /\.session-switch\s*\{[^}]*width:\s*44px;[^}]*height:\s*44px;/su);
+  assert.match(css, /\.session-open-button\s*\{[^}]*min-height:\s*44px;/su);
   assert.match(html, /id="sessions-panel"[^>]*aria-busy="false"/u);
   assert.match(html, /id="thread-list"[^>]*aria-busy="false"/u);
   assert.doesNotMatch(renderer, /\.innerHTML\b/u);
@@ -51,6 +57,10 @@ test('desktop renderer modules and preload are included in the local protocol bu
   assert.doesNotMatch(renderer, /network:\s*run\.network/u);
   assert.doesNotMatch(renderer, /dangerFullAccess:\s*run\.dangerFullAccess/u);
   assert.match(renderer, /network:\s*ui\.resumeNetwork\.checked/u);
+  assert.match(main, /shell\.openExternal\(deepLink\)/u);
+  assert.match(main, /threads:open-in-codex/u);
+  assert.match(preload, /threads:open-in-codex/u);
+  assert.doesNotMatch(preload, /openExternal/u);
 });
 
 test('desktop package uses a strict application allowlist', () => {

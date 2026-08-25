@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  codexThreadDeepLink,
   parseAttachRunInput,
   parseAttachmentPaths,
   parseDoctorInput,
   parseResumeRunInput,
   parseRunId,
   parseStartRunInput,
+  parseThreadId,
 } from '../dist/desktop/contracts.js';
 
 const startInput = {
@@ -33,10 +35,15 @@ test('desktop contracts accept exact inputs without an artificial objective limi
   assert.deepEqual(parseAttachmentPaths(['C:\\workspace\\brief.pdf']), ['C:\\workspace\\brief.pdf']);
   assert.deepEqual(parseDoctorInput({ workspace: null, binary: null }), { workspace: null, binary: null });
   assert.equal(parseRunId('123e4567-e89b-42d3-a456-426614174000'), '123e4567-e89b-42d3-a456-426614174000');
-  assert.deepEqual(parseAttachRunInput({ ...startInput, threadId: 'thread-existing' }), {
+  assert.deepEqual(parseAttachRunInput({ ...startInput, threadId: '01a0291b-9f2e-7152-9575-c8f7c545b848' }), {
     ...startInput,
-    threadId: 'thread-existing',
+    threadId: '01a0291b-9f2e-7152-9575-c8f7c545b848',
   });
+  assert.equal(parseThreadId('01a0291b-9f2e-7152-9575-c8f7c545b848'), '01a0291b-9f2e-7152-9575-c8f7c545b848');
+  assert.equal(
+    codexThreadDeepLink('01A0291B-9F2E-7152-9575-C8F7C545B848'),
+    'codex://threads/01a0291b-9f2e-7152-9575-c8f7c545b848',
+  );
 });
 
 test('desktop contracts reject extra fields and unconfirmed full access', () => {
@@ -57,6 +64,9 @@ test('desktop contracts reject malformed identifiers and oversized values', () =
   assert.throws(() => parseStartRunInput({ ...startInput, maxTurns: 1001 }), /invalidos/i);
   assert.throws(() => parseStartRunInput({ ...startInput, verifyCommands: Array.from({ length: 21 }, () => 'true') }), /invalidos/i);
   assert.throws(() => parseAttachRunInput({ ...startInput, threadId: '../thread\n' }), /invalidos/i);
+  assert.throws(() => parseThreadId('01a0291b-9f2e-7152-9575-c8f7c545b84'), /invalido/i);
+  assert.throws(() => parseThreadId('01a0291b-9f2e-7152-z575-c8f7c545b848'), /invalido/i);
+  assert.throws(() => codexThreadDeepLink('https://example.com'), /invalido/i);
   assert.throws(() => parseAttachRunInput({ ...startInput, threadId: 'thread-ok', extra: true }), /invalidos/i);
   assert.throws(() => parseStartRunInput({ ...startInput, attachments: ['relative.txt'] }), /invalidos/i);
   assert.throws(() => parseAttachmentPaths(['C:\\file.txt', 'C:\\file.txt']), /invalidas/i);

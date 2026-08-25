@@ -43,6 +43,12 @@ try {
   await window.waitForLoadState('domcontentloaded');
   assert.equal(await window.title(), 'Codex Infinite');
   assert.equal(await window.url(), 'codex-infinite://app/index.html');
+  const inspectorLinkState = await window.evaluate(() => ({
+    buttonHidden: document.querySelector('#inspect-open-codex-button')?.hidden,
+    runHidden: document.querySelector('#run-detail')?.hidden,
+    thread: document.querySelector('#run-thread')?.textContent,
+  }));
+  assert.equal(inspectorLinkState.buttonHidden, inspectorLinkState.runHidden || inspectorLinkState.thread === 'Pendiente');
   const system = await window.evaluate(() => window.codexInfinite.systemInfo());
   assert.deepEqual(
     { platform: system.platform, arch: system.arch },
@@ -66,6 +72,10 @@ try {
   await window.screenshot({ path: path.join(qaDirectory, 'desktop-sessions.png') });
   const attachableSession = window.locator('.session-switch:enabled').first();
   if (await attachableSession.count() > 0) {
+    const sessionItem = attachableSession.locator('xpath=ancestor::li[contains(@class, "session-item")]');
+    const openInCodex = sessionItem.locator('.session-open-button');
+    assert.equal(await openInCodex.isVisible(), true);
+    assert.match(await openInCodex.getAttribute('aria-label'), /^Abrir .+ en Codex Desktop$/u);
     await attachableSession.click();
     assert.equal(await window.locator('#goal-dialog').evaluate((dialog) => dialog.open), true);
     assert.equal(await window.locator('#goal-thread-row').isVisible(), true);

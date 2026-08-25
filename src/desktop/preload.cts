@@ -15,6 +15,7 @@ const CHANNELS = {
   attachRun: 'runs:attach',
   resumeRun: 'runs:resume',
   pauseRun: 'runs:pause',
+  openCodexThread: 'threads:open-in-codex',
   listThreads: 'threads:list',
   listSessions: 'sessions:list',
   event: 'runs:event',
@@ -34,6 +35,7 @@ const api: DesktopApi = {
   attachRun: (input) => ipcRenderer.invoke(CHANNELS.attachRun, input),
   resumeRun: (input) => ipcRenderer.invoke(CHANNELS.resumeRun, input),
   pauseRun: (runId) => ipcRenderer.invoke(CHANNELS.pauseRun, runId),
+  openCodexThread: (threadId) => ipcRenderer.invoke(CHANNELS.openCodexThread, threadId),
   listThreads: (input) => ipcRenderer.invoke(CHANNELS.listThreads, input),
   listSessions: (input) => ipcRenderer.invoke(CHANNELS.listSessions, input),
   onEvent: (listener) => {

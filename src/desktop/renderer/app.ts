@@ -66,6 +66,7 @@ const ui = {
   inspectCreated: element<HTMLElement>('inspect-created'),
   inspectGit: element<HTMLElement>('inspect-git'),
   inspectLimit: element<HTMLElement>('inspect-limit'),
+  inspectOpenCodexButton: element<HTMLButtonElement>('inspect-open-codex-button'),
   inspectRunId: element<HTMLElement>('inspect-run-id'),
   inspectServer: element<HTMLElement>('inspect-server'),
   inspectorPanel: element<HTMLElement>('inspector-panel'),
@@ -384,6 +385,7 @@ function renderVerification(run: RunState): void {
 }
 
 function renderInspector(run: RunState | null): void {
+  ui.inspectOpenCodexButton.hidden = !run?.threadId;
   if (!run) {
     ui.inspectRunId.textContent = '—';
     ui.inspectCreated.textContent = '—';
@@ -397,6 +399,20 @@ function renderInspector(run: RunState | null): void {
   const branch = run.gitBaseline.branch ?? 'HEAD separado';
   const head = run.gitBaseline.head ? run.gitBaseline.head.slice(0, 9) : 'sin commit';
   ui.inspectGit.textContent = `${branch} · ${head} · ${run.gitBaseline.dirty ? 'con cambios' : 'limpio'}`;
+}
+
+async function openThreadInCodex(threadId: string, label: string): Promise<void> {
+  try {
+    await api.openCodexThread(threadId);
+    appendLog('info', `Abriendo ${threadId} en Codex Desktop.`);
+    toast('Sesión abierta en Codex Desktop.');
+    announce(`${label} abierta en Codex Desktop.`);
+  } catch (error) {
+    const message = errorText(error);
+    appendLog('error', `Abrir en Codex: ${message}`);
+    toast(message, true);
+    announce('No se pudo abrir la sesión en Codex Desktop.');
+  }
 }
 
 function runIsBusy(runId: string): boolean {
@@ -622,6 +638,10 @@ function renderThreads(): void {
     && activeElement.classList.contains('session-state')
     ? activeElement.dataset.threadId ?? null
     : null;
+  const focusedOpenThreadId = activeElement instanceof HTMLButtonElement
+    && activeElement.classList.contains('session-open-button')
+    ? activeElement.dataset.threadId ?? null
+    : null;
   if (pendingSwitchFocusThreadId && focusedStateThreadId !== pendingSwitchFocusThreadId) {
     pendingSwitchFocusThreadId = null;
   }
@@ -644,6 +664,15 @@ function renderThreads(): void {
     state.dataset.threadId = thread.id;
     state.tabIndex = -1;
     const toggle = document.createElement('button');
+    const actions = document.createElement('div');
+    actions.className = 'session-actions';
+    const openButton = document.createElement('button');
+    openButton.type = 'button';
+    openButton.className = 'text-button session-open-button';
+    openButton.dataset.threadId = thread.id;
+    openButton.textContent = 'Abrir en Codex';
+    openButton.setAttribute('aria-label', `Abrir ${title.textContent} en Codex Desktop`);
+    openButton.addEventListener('click', () => { void openThreadInCodex(thread.id, title.textContent ?? 'Sesión'); });
     const checked = session.operationActive || session.goal?.status === 'active';
     toggle.type = 'button';
     toggle.className = 'session-switch';
@@ -662,11 +691,16 @@ function renderThreads(): void {
     }
     toggle.addEventListener('click', () => { void toggleSession(session); });
     content.append(title, meta, state);
-    item.append(content, toggle);
+    actions.append(openButton, toggle);
+    item.append(content, actions);
     fragment.append(item);
   }
   ui.threadList.replaceChildren(fragment);
-  if (focusedThreadId) {
+  if (focusedOpenThreadId) {
+    const focusedOpen = [...ui.threadList.querySelectorAll<HTMLButtonElement>('.session-open-button')]
+      .find((candidate) => candidate.dataset.threadId === focusedOpenThreadId);
+    focusedOpen?.focus({ preventScroll: true });
+  } else if (focusedThreadId) {
     const focusedSwitch = [...ui.threadList.querySelectorAll<HTMLButtonElement>('.session-switch')]
       .find((candidate) => candidate.dataset.threadId === focusedThreadId);
     const focusedState = [...ui.threadList.querySelectorAll<HTMLElement>('.session-state')]
@@ -1211,6 +1245,10 @@ function wireEvents(): () => void {
   ui.doctorButton.addEventListener('click', () => { void runDoctor(); });
   ui.dialogDoctorButton.addEventListener('click', () => { void runDoctor(); });
   ui.threadsRefreshButton.addEventListener('click', () => { void refreshThreads(); });
+  ui.inspectOpenCodexButton.addEventListener('click', () => {
+    const run = selectedRun();
+    if (run?.threadId) void openThreadInCodex(run.threadId, run.name || 'Sesión');
+  });
   ui.resumeButton.addEventListener('click', openResumeDialog);
   ui.pauseButton.addEventListener('click', () => { void pauseSelectedRun(); });
   ui.clearLogsButton.addEventListener('click', clearLogs);

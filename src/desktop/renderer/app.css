@@ -905,6 +905,17 @@ progress::-webkit-progress-value { background: var(--accent); }
   border-top: 0;
 }
 
+.session-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.session-open-button {
+  min-height: 44px;
+  white-space: nowrap;
+}
+
 .session-title,
 .session-meta,
 .session-state {
@@ -944,6 +955,11 @@ progress::-webkit-progress-value { background: var(--accent); }
   border-radius: 3px;
   outline: 2px solid var(--focus);
   outline-offset: 3px;
+}
+
+.inspector-open-button {
+  width: 100%;
+  margin-top: 14px;
 }
 
 .session-switch {

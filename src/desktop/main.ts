@@ -9,6 +9,7 @@ import {
   Menu,
   protocol,
   session,
+  shell,
   type IpcMainInvokeEvent,
 } from 'electron';
 import squirrelStartup from 'electron-squirrel-startup';
@@ -18,6 +19,7 @@ import { doctorDesktop, listDesktopSessions, listDesktopThreads } from '../opera
 import { listRuns, loadRun } from '../state.js';
 import {
   DESKTOP_ORIGIN,
+  codexThreadDeepLink,
   parseAttachRunInput,
   parseAttachmentPaths,
   parseDoctorInput,
@@ -44,6 +46,7 @@ const CHANNELS = {
   attachRun: 'runs:attach',
   resumeRun: 'runs:resume',
   pauseRun: 'runs:pause',
+  openCodexThread: 'threads:open-in-codex',
   listThreads: 'threads:list',
   listSessions: 'sessions:list',
   event: 'runs:event',
@@ -174,6 +177,15 @@ function registerHandlers(): void {
   ipcMain.handle(CHANNELS.pauseRun, (event, raw: unknown) => {
     assertTrustedSender(event);
     return runManager.pause(parseRunId(raw));
+  });
+  ipcMain.handle(CHANNELS.openCodexThread, async (event, raw: unknown) => {
+    assertTrustedSender(event);
+    const deepLink = codexThreadDeepLink(raw);
+    try {
+      await shell.openExternal(deepLink);
+    } catch (error) {
+      throw new Error(`No se pudo abrir Codex Desktop: ${sanitizeLog(errorMessage(error))}`);
+    }
   });
   ipcMain.handle(CHANNELS.listThreads, async (event, raw: unknown) => {
     assertTrustedSender(event);

@@ -1,12 +1,60 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import readline from 'node:readline';
 import { AppError, RpcError, errorMessage } from '../errors.js';
 import type { Logger } from '../log.js';
 import { minimalWindowsEnvironment, spawnManagedProcess, terminateProcessTree } from '../trusted-process.js';
 
 const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 const MAX_STDERR_BUFFER = 64 * 1024;
+
+export class BoundedJsonLineFramer {
+  private readonly chunks: Buffer[] = [];
+  private bufferedBytes = 0;
+
+  push(chunk: Buffer, onLine: (line: string) => void): void {
+    let offset = 0;
+    while (offset < chunk.length) {
+      const newline = chunk.indexOf(0x0a, offset);
+      const end = newline === -1 ? chunk.length : newline;
+      this.append(chunk.subarray(offset, end));
+      if (newline === -1) return;
+      this.flush(onLine, true);
+      offset = newline + 1;
+    }
+  }
+
+  finish(onLine: (line: string) => void): void {
+    if (this.bufferedBytes > 0) this.flush(onLine, false);
+  }
+
+  private append(chunk: Buffer): void {
+    if (chunk.length === 0) return;
+    const nextBytes = this.bufferedBytes + chunk.length;
+    const lastByte = chunk[chunk.length - 1];
+    if (nextBytes > MAX_MESSAGE_BYTES + 1
+      || (nextBytes === MAX_MESSAGE_BYTES + 1 && lastByte !== 0x0d)) {
+      this.reset();
+      throw new AppError('RPC_MESSAGE_TOO_LARGE', 'App Server envio un mensaje que excede el limite de seguridad.');
+    }
+    this.chunks.push(Buffer.from(chunk));
+    this.bufferedBytes = nextBytes;
+  }
+
+  private flush(onLine: (line: string) => void, stripCarriageReturn: boolean): void {
+    let bytes = this.bufferedBytes === 0 ? Buffer.alloc(0) : Buffer.concat(this.chunks, this.bufferedBytes);
+    this.reset();
+    if (stripCarriageReturn && bytes[bytes.length - 1] === 0x0d) bytes = bytes.subarray(0, -1);
+    if (bytes.length > MAX_MESSAGE_BYTES) {
+      throw new AppError('RPC_MESSAGE_TOO_LARGE', 'App Server envio un mensaje que excede el limite de seguridad.');
+    }
+    onLine(bytes.toString('utf8'));
+  }
+
+  private reset(): void {
+    this.chunks.length = 0;
+    this.bufferedBytes = 0;
+  }
+}
 
 export interface RpcMessage {
   id?: number | string;
@@ -57,12 +105,13 @@ export class JsonRpcProcess extends EventEmitter {
   private nextId = 1;
   private closed = false;
   private stderrBuffer = '';
+  private readonly stdoutFramer = new BoundedJsonLineFramer();
 
   private constructor(process: ChildProcessWithoutNullStreams, private readonly logger: Logger) {
     super();
     this.process = process;
-    const lines = readline.createInterface({ input: process.stdout, crlfDelay: Infinity });
-    lines.on('line', (line) => this.handleLine(line));
+    process.stdout.on('data', (chunk: Buffer) => this.handleStdoutChunk(chunk));
+    process.stdout.on('end', () => this.handleStdoutEnd());
     process.stderr.on('data', (chunk: Buffer) => {
       this.stderrBuffer = (this.stderrBuffer + chunk.toString('utf8')).slice(-MAX_STDERR_BUFFER);
       const text = chunk.toString('utf8').trim();
@@ -159,12 +208,32 @@ export class JsonRpcProcess extends EventEmitter {
     this.process.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
-  private handleLine(line: string): void {
-    if (Buffer.byteLength(line, 'utf8') > MAX_MESSAGE_BYTES) {
-      this.handleClose(new AppError('RPC_MESSAGE_TOO_LARGE', 'App Server envio un mensaje que excede el limite de seguridad.'));
+  private handleStdoutChunk(chunk: Buffer): void {
+    if (this.closed) return;
+    try {
+      this.stdoutFramer.push(chunk, (line) => this.handleLine(line));
+    } catch (error) {
+      const failure = error instanceof Error
+        ? error
+        : new AppError('INVALID_APP_SERVER_RESPONSE', 'App Server envio una respuesta invalida.');
+      this.handleClose(failure);
       void this.close();
-      return;
     }
+  }
+
+  private handleStdoutEnd(): void {
+    if (this.closed) return;
+    try {
+      this.stdoutFramer.finish((line) => this.handleLine(line));
+    } catch (error) {
+      const failure = error instanceof Error
+        ? error
+        : new AppError('INVALID_APP_SERVER_RESPONSE', 'App Server envio una respuesta invalida.');
+      this.handleClose(failure);
+    }
+  }
+
+  private handleLine(line: string): void {
     let message: RpcMessage;
     try {
       message = JSON.parse(line) as RpcMessage;

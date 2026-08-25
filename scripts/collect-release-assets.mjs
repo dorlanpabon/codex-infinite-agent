@@ -20,13 +20,15 @@ await mkdir(releaseRoot, { recursive: true });
 const files = await walk(makeRoot);
 const target = process.platform === 'win32'
   ? 'windows-x64'
-  : process.platform === 'darwin'
+  : process.platform === 'darwin' && process.arch === 'arm64'
     ? 'macos-arm64'
+    : process.platform === 'darwin' && process.arch === 'x64'
+      ? 'macos-x64'
     : process.platform === 'linux' && process.arch === 'x64'
-      ? 'linux-x64'
-      : process.platform === 'linux' && process.arch === 'arm64'
-        ? 'linux-arm64'
-        : null;
+        ? 'linux-x64'
+        : process.platform === 'linux' && process.arch === 'arm64'
+          ? 'linux-arm64'
+          : null;
 if (!target) throw new Error(`Plataforma de release no soportada: ${process.platform}/${process.arch}.`);
 
 const expected = process.platform === 'win32'

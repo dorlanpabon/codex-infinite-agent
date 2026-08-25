@@ -44,7 +44,7 @@ export interface BlockingEvidence {
 }
 
 export interface RunState {
-  schemaVersion: 2;
+  schemaVersion: 3;
   runId: string;
   threadId: string | null;
   activeTurnId: string | null;
@@ -52,6 +52,7 @@ export interface RunState {
   nativeGoalStatus: GoalStatus | null;
   nativeGoalCreatedAt: number | null;
   goalTokenBudget: number | null;
+  turnBaselineId: string | null;
   observedTurnIds: string[];
   acknowledgedBlockingTurnIds: string[];
   workspace: string;
@@ -148,6 +149,10 @@ function validGitBaseline(value: unknown, workspace: string): boolean {
 function validateState(value: unknown): asserts value is RunState {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new AppError('INVALID_STATE', 'Estado de ejecucion invalido.');
   const item = value as Record<string, unknown>;
+  if (item.schemaVersion === 2) {
+    item.schemaVersion = 3;
+    item.turnBaselineId = null;
+  }
   if (item.blockingEvidence === undefined) {
     item.blockingEvidence = isRecord(item.lastTurn) && typeof item.lastTurn.turnId === 'string'
       && typeof item.lastTurn.blockedReason === 'string' && item.lastTurn.blockedReason.length > 0
@@ -155,6 +160,7 @@ function validateState(value: unknown): asserts value is RunState {
       : null;
   }
   if (item.acknowledgedBlockingTurnIds === undefined) item.acknowledgedBlockingTurnIds = [];
+  if (item.turnBaselineId === undefined) item.turnBaselineId = null;
   if (item.goalObjective === undefined) item.goalObjective = item.objective;
   if (item.attachments === undefined) item.attachments = [];
   if (item.contextInjectionStatus === undefined) item.contextInjectionStatus = 'notRequired';
@@ -203,7 +209,7 @@ function validateState(value: unknown): asserts value is RunState {
   const contextStatuses = new Set<ContextInjectionStatus>(['notRequired', 'required', 'pending', 'injected']);
   const contextRequired = typeof item.objective === 'string' && Array.isArray(item.attachments)
     && (item.objective.length > 4000 || item.attachments.length > 0);
-  if (item.schemaVersion !== 2 || !validRunId(item.runId) || !path.isAbsolute(workspace)
+  if (item.schemaVersion !== 3 || !validRunId(item.runId) || !path.isAbsolute(workspace)
     || typeof item.objective !== 'string' || item.objective.length < 1
     || typeof item.goalObjective !== 'string' || item.goalObjective.length < 1 || item.goalObjective.length > 4000
     || !Array.isArray(item.attachments) || item.attachments.length > 100
@@ -221,6 +227,8 @@ function validateState(value: unknown): asserts value is RunState {
     || !(item.nativeGoalStatus === null || (typeof item.nativeGoalStatus === 'string' && goalStatuses.has(item.nativeGoalStatus as GoalStatus)))
     || !(item.nativeGoalCreatedAt === null || (Number.isFinite(item.nativeGoalCreatedAt) && (item.nativeGoalCreatedAt as number) >= 0))
     || !(item.goalTokenBudget === null || (Number.isSafeInteger(item.goalTokenBudget) && (item.goalTokenBudget as number) > 0 && (item.goalTokenBudget as number) <= 2_000_000_000))
+    || !(item.turnBaselineId === null
+      || (typeof item.turnBaselineId === 'string' && item.turnBaselineId.length > 0 && item.turnBaselineId.length <= 128))
     || !Array.isArray(item.observedTurnIds) || item.observedTurnIds.length > 1000
     || !item.observedTurnIds.every((entry) => typeof entry === 'string' && entry.length > 0 && entry.length <= 128)
     || new Set(item.observedTurnIds).size !== item.observedTurnIds.length
@@ -242,12 +250,12 @@ function validateState(value: unknown): asserts value is RunState {
   }
 }
 
-export function createRunState(input: Omit<RunState, 'schemaVersion' | 'runId' | 'threadId' | 'activeTurnId' | 'goalActivationPending' | 'nativeGoalStatus' | 'nativeGoalCreatedAt' | 'goalTokenBudget' | 'goalObjective' | 'attachments' | 'contextInjectionStatus' | 'observedTurnIds' | 'acknowledgedBlockingTurnIds' | 'status' | 'createdAt' | 'updatedAt' | 'startedAt' | 'completedAt' | 'turnCount' | 'totalTokens' | 'verificationAttempts' | 'gitFinal' | 'lastTurn' | 'blockingEvidence' | 'lastVerification' | 'lastError'> & { attachments?: string[] }): RunState {
+export function createRunState(input: Omit<RunState, 'schemaVersion' | 'runId' | 'threadId' | 'activeTurnId' | 'goalActivationPending' | 'nativeGoalStatus' | 'nativeGoalCreatedAt' | 'goalTokenBudget' | 'goalObjective' | 'attachments' | 'contextInjectionStatus' | 'turnBaselineId' | 'observedTurnIds' | 'acknowledgedBlockingTurnIds' | 'status' | 'createdAt' | 'updatedAt' | 'startedAt' | 'completedAt' | 'turnCount' | 'totalTokens' | 'verificationAttempts' | 'gitFinal' | 'lastTurn' | 'blockingEvidence' | 'lastVerification' | 'lastError'> & { attachments?: string[] }): RunState {
   const now = new Date().toISOString();
   const attachments = input.attachments ?? [];
   const contextRequired = input.objective.length > 4000 || attachments.length > 0;
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     runId: randomUUID(),
     threadId: null,
     activeTurnId: null,
@@ -255,6 +263,7 @@ export function createRunState(input: Omit<RunState, 'schemaVersion' | 'runId' |
     nativeGoalStatus: null,
     nativeGoalCreatedAt: null,
     goalTokenBudget: input.tokenBudget,
+    turnBaselineId: null,
     observedTurnIds: [],
     acknowledgedBlockingTurnIds: [],
     goalObjective: contextRequired ? CONTEXT_GOAL_OBJECTIVE : input.objective,

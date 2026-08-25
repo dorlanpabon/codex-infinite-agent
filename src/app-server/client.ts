@@ -105,6 +105,7 @@ export interface NativeGoalOptions {
   turnTimeoutMs: number;
   maxTurns: number;
   signal: AbortSignal;
+  beforeActivation?(signal: AbortSignal): Promise<void>;
   onActivationAttempt?(): void;
   onActivated?(goal: GoalInfo): Promise<void> | void;
   onGoalUpdated?(goal: GoalInfo): Promise<void> | void;
@@ -128,6 +129,17 @@ export interface PersistedTurn {
   error: string | null;
   blockedReason: string | null;
 }
+
+export interface RecentMessage {
+  turnId: string;
+  role: 'user' | 'assistant';
+  text: string;
+}
+
+const RECENT_MESSAGE_CHAR_LIMIT = 4_000;
+const RECENT_CONTEXT_CHAR_LIMIT = 24_000;
+const RECENT_CONTEXT_MESSAGE_LIMIT = 20;
+const RECENT_CONTEXT_ITEM_LIMIT = 1_000;
 
 const ALL_THREAD_SOURCE_KINDS = [
   'cli', 'vscode', 'exec', 'appServer', 'subAgent', 'subAgentReview',
@@ -461,7 +473,7 @@ export class CodexDesktopClient {
   }
 
   async readTurn(threadId: string, turnId: string, timeoutMs = 60_000): Promise<PersistedTurn | null> {
-    return (await this.listTurns(threadId, 1000, timeoutMs)).find((turn) => turn.turnId === turnId) ?? null;
+    return (await this.listRecentTurns(threadId, 2001, timeoutMs)).find((turn) => turn.turnId === turnId) ?? null;
   }
 
   async listTurns(threadId: string, maximum = 1000, timeoutMs = 60_000): Promise<PersistedTurn[]> {
@@ -499,6 +511,108 @@ export class CodexDesktopClient {
     } while (cursor && result.length < maximum);
     if (cursor) throw new AppError('TURN_HISTORY_LIMIT', `El thread excede el limite reconciliable de ${maximum} turnos.`);
     return result;
+  }
+
+  async listRecentTurns(threadId: string, maximum = 1000, timeoutMs = 60_000): Promise<PersistedTurn[]> {
+    if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > 2001) {
+      throw new AppError('INVALID_TURN_HISTORY_LIMIT', 'La ventana reciente debe estar entre 1 y 2001 turnos.');
+    }
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new AppError('INVALID_TURN_HISTORY_TIMEOUT', 'El tiempo de reconciliacion debe ser positivo.');
+    }
+    const descending: PersistedTurn[] = [];
+    const deadline = Date.now() + timeoutMs;
+    const seenCursors = new Set<string>();
+    let cursor: string | null = null;
+    do {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new AppError('TURN_HISTORY_TIMEOUT', 'Tiempo agotado al reconciliar turnos recientes.');
+      const pageLimit = Math.min(100, maximum - descending.length);
+      const response: unknown = await this.rpc.request('thread/turns/list', {
+        threadId,
+        cursor,
+        limit: pageLimit,
+        sortDirection: 'desc',
+        itemsView: 'full',
+      }, Math.min(60_000, remaining));
+      if (Date.now() > deadline) throw new AppError('TURN_HISTORY_TIMEOUT', 'Tiempo agotado al reconciliar turnos recientes.');
+      if (!isRecord(response) || !Array.isArray(response.data) || !response.data.every(isRecord)
+        || response.data.length > pageLimit) {
+        throw new AppError('INVALID_APP_SERVER_RESPONSE', 'Respuesta thread/turns/list reciente invalida.');
+      }
+      descending.push(...response.data.map((turn) => this.parsePersistedTurn(turn)));
+      const nextCursor = typeof response.nextCursor === 'string' ? response.nextCursor : null;
+      if (nextCursor !== null && (response.data.length === 0 || seenCursors.has(nextCursor))) {
+        throw new AppError('INVALID_APP_SERVER_RESPONSE', 'thread/turns/list devolvio un cursor reciente estancado o repetido.');
+      }
+      if (nextCursor !== null) seenCursors.add(nextCursor);
+      cursor = nextCursor;
+    } while (cursor && descending.length < maximum);
+    return descending.reverse();
+  }
+
+  async listRecentMessages(threadId: string, maximumTurns = 5, timeoutMs = 30_000): Promise<RecentMessage[]> {
+    if (!Number.isSafeInteger(maximumTurns) || maximumTurns < 1 || maximumTurns > 10) {
+      throw new AppError('INVALID_RECENT_CONTEXT_LIMIT', 'El limite de contexto reciente debe estar entre 1 y 10 turnos.');
+    }
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new AppError('INVALID_RECENT_CONTEXT_TIMEOUT', 'El tiempo para consultar el contexto reciente debe ser positivo.');
+    }
+    const response: unknown = await this.rpc.request('thread/turns/list', {
+      threadId,
+      cursor: null,
+      limit: maximumTurns,
+      sortDirection: 'desc',
+      itemsView: 'summary',
+    }, timeoutMs);
+    if (!isRecord(response) || !Array.isArray(response.data) || !response.data.every(isRecord)) {
+      throw new AppError('INVALID_APP_SERVER_RESPONSE', 'Respuesta de contexto reciente invalida.');
+    }
+    if (response.data.length > maximumTurns) {
+      throw new AppError('INVALID_APP_SERVER_RESPONSE', 'App Server excedio el limite solicitado de turnos recientes.');
+    }
+
+    const chronological: RecentMessage[] = [];
+    for (const turn of [...response.data].reverse()) {
+      const turnId = requiredString(turn.id, 'turn.id');
+      if (turnId.length > 512) throw new AppError('INVALID_APP_SERVER_RESPONSE', 'App Server devolvio turn.id demasiado largo.');
+      if (Array.isArray(turn.items) && turn.items.length > RECENT_CONTEXT_ITEM_LIMIT) {
+        throw new AppError('INVALID_APP_SERVER_RESPONSE', 'App Server devolvio demasiados items para un turno reciente.');
+      }
+      if (!Array.isArray(turn.items)) continue;
+      for (const item of turn.items) {
+        if (!isRecord(item)) continue;
+        if (item.type === 'userMessage' && Array.isArray(item.content)) {
+          const chunks: string[] = [];
+          let remaining = RECENT_MESSAGE_CHAR_LIMIT;
+          for (const part of item.content) {
+            if (!isRecord(part) || part.type !== 'text' || typeof part.text !== 'string' || remaining === 0) continue;
+            const separatorLength = chunks.length === 0 ? 0 : 1;
+            const chunk = part.text.slice(0, Math.max(0, remaining - separatorLength));
+            if (!chunk) continue;
+            chunks.push(chunk);
+            remaining -= separatorLength + chunk.length;
+          }
+          const text = chunks.join('\n').trim();
+          if (text) chronological.push({ turnId, role: 'user', text });
+        } else if (item.type === 'agentMessage' && typeof item.text === 'string') {
+          const text = item.text.slice(0, RECENT_MESSAGE_CHAR_LIMIT).trim();
+          if (text) chronological.push({ turnId, role: 'assistant', text });
+        }
+      }
+    }
+
+    const selected: RecentMessage[] = [];
+    let remainingCharacters = RECENT_CONTEXT_CHAR_LIMIT;
+    for (let index = chronological.length - 1; index >= 0 && selected.length < RECENT_CONTEXT_MESSAGE_LIMIT; index -= 1) {
+      const message = chronological[index]!;
+      const text = message.text.slice(0, Math.min(RECENT_MESSAGE_CHAR_LIMIT, remainingCharacters));
+      if (!text) break;
+      selected.push({ ...message, text });
+      remainingCharacters -= text.length;
+      if (remainingCharacters === 0) break;
+    }
+    return selected.reverse();
   }
 
   private parsePersistedTurn(turn: Record<string, unknown>): PersistedTurn {
@@ -694,6 +808,7 @@ export class CodexDesktopClient {
     }
 
     let activated = false;
+    let activationAttempted = false;
     let settled = false;
     let activeTurnId: string | null = options.existingTurnId ?? null;
     let lastGoal: GoalInfo | null = null;
@@ -718,6 +833,7 @@ export class CodexDesktopClient {
     let terminalQuiescence: Promise<void> | null = null;
     let terminalQuiescent = false;
     let activationCloseStarted = false;
+    const preactivationAbort = new AbortController();
     let rejectActivationAbort: ((reason: unknown) => void) | null = null;
     const activationAbort = new Promise<never>((_resolve, reject) => {
       rejectActivationAbort = reject;
@@ -737,6 +853,7 @@ export class CodexDesktopClient {
     const fail = (error: unknown): void => {
       if (settled) return;
       settled = true;
+      preactivationAbort.abort();
       completionReject?.(error instanceof Error ? error : new AppError('GOAL_FAILED', String(error)));
     };
     const enqueue = (callback: (() => Promise<void> | void) | undefined): void => {
@@ -750,6 +867,7 @@ export class CodexDesktopClient {
     };
     const startTerminalQuiescence = (): void => {
       if (terminalQuiescence || settled) return;
+      const ownedStoppingTurnId = activeTurnId;
       terminalQuiescence = (async () => {
         const deadline = shutdownDeadline();
         let idleSince: number | null = null;
@@ -757,26 +875,29 @@ export class CodexDesktopClient {
         const lastInterruptAt = new Map<string, number>();
         while (!settled && Date.now() < deadline) {
           const remaining = deadline - Date.now();
-          const turns = await this.listTurns(options.threadId, 1001, Math.max(1, remaining));
+          const turns = await this.listRecentTurns(
+            options.threadId,
+            Math.min(2001, options.maxTurns + 2),
+            Math.max(1, remaining),
+          );
           const inProgress = turns.filter((turn) => turn.status === 'inProgress');
+          const unownedTurn = inProgress.find((turn) => turn.turnId !== ownedStoppingTurnId);
+          if (unownedTurn) {
+            throw new AppError(
+              'UNOWNED_THREAD_ACTIVITY',
+              `El turno ${unownedTurn.turnId} inicio durante la terminacion y no se interrumpira.`,
+            );
+          }
           const byId = new Map(turns.map((turn) => [turn.turnId, turn]));
           const interruptIds = new Set<string>();
-          if (activeTurnId) {
-            const active = byId.get(activeTurnId);
-            if (!active || active.status === 'inProgress') interruptIds.add(activeTurnId);
+          if (ownedStoppingTurnId) {
+            const active = byId.get(ownedStoppingTurnId);
+            if (!active || active.status === 'inProgress') interruptIds.add(ownedStoppingTurnId);
           }
-          for (const turn of inProgress) interruptIds.add(turn.turnId);
           if (interruptIds.size > 0) {
             terminalQuiescent = false;
             idleSince = null;
             for (const pendingTurnId of interruptIds) {
-              activeTurnId = pendingTurnId;
-              this.activeTurnId = pendingTurnId;
-              if (!seenTurnIds.has(pendingTurnId)) {
-                seenTurnIds.add(pendingTurnId);
-                turnsStarted += 1;
-                enqueue(options.onTurnStarted ? () => options.onTurnStarted!(pendingTurnId) : undefined);
-              }
               if (!failedByTurn.has(pendingTurnId)) failedByTurn.set(pendingTurnId, new Set());
               if (Date.now() - (lastInterruptAt.get(pendingTurnId) ?? 0) < 500) continue;
               lastInterruptAt.set(pendingTurnId, Date.now());
@@ -1034,6 +1155,18 @@ export class CodexDesktopClient {
 
         if (message.method === 'turn/started' && isRecord(message.params.turn)) {
           const turnId = requiredString(message.params.turn.id, 'turn.id');
+          if (!activationAttempted && turnId !== options.existingTurnId) {
+            throw new AppError(
+              'UNOWNED_THREAD_ACTIVITY',
+              `El turno ${turnId} inicio antes del intento de activar el Goal y no se administrara.`,
+            );
+          }
+          if ((requestedStop || terminalGoal) && turnId !== activeTurnId) {
+            throw new AppError(
+              'UNOWNED_THREAD_ACTIVITY',
+              `El turno ${turnId} inicio despues del estado terminal y no se interrumpira.`,
+            );
+          }
           if (activeTurnId && activeTurnId !== turnId) {
             if (!requestedStop && !terminalGoal) {
               fail(new AppError('OVERLAPPING_TURNS', 'Codex inicio dos turnos simultaneos en el Goal administrado.'));
@@ -1106,6 +1239,7 @@ export class CodexDesktopClient {
       fail(error instanceof Error ? error : new AppError('APP_SERVER_CLOSED', 'App Server se cerro durante el Goal.'));
     };
     const abortListener = (): void => {
+      preactivationAbort.abort();
       requestStop('paused', 'signal');
       if (!activated && !activationCloseStarted) {
         activationCloseStarted = true;
@@ -1133,10 +1267,19 @@ export class CodexDesktopClient {
 
     try {
       if (options.signal.aborted) throw new AppError('INTERRUPTED', 'Interrumpido antes de activar el Goal.', 130);
+      try {
+        await options.beforeActivation?.(preactivationAbort.signal);
+      } catch (error) {
+        if (settled) return await completion;
+        throw error;
+      }
+      if (settled) return await completion;
+      if (options.signal.aborted) throw new AppError('INTERRUPTED', 'Interrumpido antes de activar el Goal.', 130);
       const activationRemaining = wallDeadlineAt - Date.now();
       if (activationRemaining <= 0) throw new AppError('GOAL_TIMEOUT', 'Tiempo agotado antes de activar el Goal.');
       let goal: GoalInfo;
       try {
+        activationAttempted = true;
         options.onActivationAttempt?.();
         goal = await Promise.race([
           this.setGoal(
@@ -1186,6 +1329,7 @@ export class CodexDesktopClient {
       return await completion;
     } finally {
       settled = true;
+      preactivationAbort.abort();
       clearTurnTimers();
       if (wallTimer) clearTimeout(wallTimer);
       if (terminalGrace) clearTimeout(terminalGrace);

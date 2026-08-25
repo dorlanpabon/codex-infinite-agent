@@ -27,6 +27,8 @@ jobs:
             target: windows-x64
           - runner: macos-15
             target: macos-arm64
+          - runner: macos-15-intel
+            target: macos-x64
           - runner: ubuntu-24.04
             target: linux-x64
           - runner: ubuntu-24.04-arm
@@ -52,7 +54,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes fakeroot rpm xvfb
+          sudo apt-get install --yes cpio fakeroot rpm xvfb
 
       - name: Install dependencies
         run: npm ci
@@ -112,6 +114,17 @@ jobs:
           dpkg-deb --contents release-assets/*.deb >/dev/null
           rpm -qpi release-assets/*.rpm
           rpm -qpl release-assets/*.rpm >/dev/null
+          protocol_root="$(mktemp -d)"
+          trap 'rm -rf "$protocol_root"' EXIT
+          mkdir "$protocol_root/deb" "$protocol_root/rpm"
+          dpkg-deb --extract release-assets/*.deb "$protocol_root/deb"
+          rpm2cpio release-assets/*.rpm | (cd "$protocol_root/rpm" && cpio --extract --make-directories --quiet)
+          for package_root in "$protocol_root/deb" "$protocol_root/rpm"; do
+            desktop_file="$(find "$package_root" -type f -name '*.desktop' -print -quit)"
+            test -n "$desktop_file"
+            grep -Fxq 'MimeType=x-scheme-handler/codex-infinite;' "$desktop_file"
+            grep -Eq '^Exec=.*[[:space:]]%U$' "$desktop_file"
+          done
 
       - name: Upload native artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

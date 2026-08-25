@@ -1,15 +1,19 @@
 import {
   EFFORTS,
   MAX_ATTACHMENTS,
+  effectiveDesktopBinary,
+  reconcileSelectedSession,
   type AttachRunInput,
   type DesktopApi,
   type DesktopEvent,
+  type DesktopNavigationTarget,
   type DesktopSessionInfo,
   type DoctorResult,
   type Effort,
   type LogLevel,
   type LocalAttachment,
   type ModelInfo,
+  type RecentMessage,
   type StartRunInput,
 } from '../contracts.js';
 
@@ -39,7 +43,16 @@ const ui = {
   binaryInput: element<HTMLInputElement>('goal-binary'),
   binaryPickerButton: element<HTMLButtonElement>('binary-picker-button'),
   clearLogsButton: element<HTMLButtonElement>('clear-logs-button'),
+  contextCloseButton: element<HTMLButtonElement>('context-close-button'),
+  contextDialog: element<HTMLDialogElement>('context-dialog'),
+  contextDoneButton: element<HTMLButtonElement>('context-done-button'),
+  contextEmpty: element<HTMLElement>('context-empty'),
+  contextMessageList: element<HTMLOListElement>('context-message-list'),
+  contextRefreshButton: element<HTMLButtonElement>('context-refresh-button'),
+  contextSource: element<HTMLElement>('context-source'),
+  contextStatus: element<HTMLElement>('context-status'),
   connectionState: element<HTMLSpanElement>('connection-state'),
+  copyRunLinkButton: element<HTMLButtonElement>('copy-run-link-button'),
   dangerConfirmation: element<HTMLInputElement>('goal-danger-confirmation'),
   dangerConfirmationRow: element<HTMLLabelElement>('danger-confirmation-row'),
   dangerFullAccess: element<HTMLInputElement>('goal-full-access'),
@@ -98,10 +111,13 @@ const ui = {
   pauseButton: element<HTMLButtonElement>('pause-button'),
   resumeCancelButton: element<HTMLButtonElement>('resume-cancel-button'),
   resumeButton: element<HTMLButtonElement>('resume-button'),
+  resumeButtonLabel: element<HTMLElement>('resume-button-label'),
   resumeCloseButton: element<HTMLButtonElement>('resume-close-button'),
   resumeDangerConfirmation: element<HTMLInputElement>('resume-danger-confirmation'),
   resumeDangerConfirmationRow: element<HTMLLabelElement>('resume-danger-confirmation-row'),
   resumeDialog: element<HTMLDialogElement>('resume-dialog'),
+  resumeDialogDescription: element<HTMLElement>('resume-dialog-description'),
+  resumeDialogTitle: element<HTMLElement>('resume-dialog-title'),
   resumeForm: element<HTMLFormElement>('resume-form'),
   resumeFormError: element<HTMLParagraphElement>('resume-form-error'),
   resumeFullAccess: element<HTMLInputElement>('resume-full-access'),
@@ -109,10 +125,12 @@ const ui = {
   resumeSubmitButton: element<HTMLButtonElement>('resume-submit-button'),
   resumeVerifyInput: element<HTMLTextAreaElement>('resume-verify'),
   runCount: element<HTMLElement>('run-count'),
+  runContextButton: element<HTMLButtonElement>('run-context-button'),
   runDetail: element<HTMLElement>('run-detail'),
   runLastTurn: element<HTMLElement>('run-last-turn'),
   runList: element<HTMLElement>('run-list'),
   runListEmpty: element<HTMLElement>('run-list-empty'),
+  runMain: element<HTMLElement>('run-main'),
   runModel: element<HTMLElement>('run-model'),
   runName: element<HTMLHeadingElement>('run-name'),
   runObjective: element<HTMLParagraphElement>('run-objective'),
@@ -205,6 +223,7 @@ let preferredNewModel: string | null = null;
 let preferredNewEffort: Effort | null = null;
 let modelSelectionManual = false;
 let sessions: DesktopSessionInfo[] = [];
+let selectedSessionThreadId: string | null = null;
 let sessionLogs: SessionLog[] = [];
 let pollInFlight = false;
 let sessionsRefreshInFlight: Promise<void> | null = null;
@@ -218,8 +237,15 @@ let resumeRunId: string | null = null;
 let attachSession: DesktopSessionInfo | null = null;
 let attachments: LocalAttachment[] = [];
 let attachmentDragDepth = 0;
+let contextGeneration = 0;
+let contextTarget: { threadId: string; workspace: string | null; binary: string | null; label: string } | null = null;
 const pendingOperations = new Map<string, string | null>();
 const settledOperations = new Set<string>();
+let navigationChain: Promise<void> = Promise.resolve();
+
+function currentBinary(): string | null {
+  return effectiveDesktopBinary(ui.binaryInput.value, chosenBinary);
+}
 
 function errorText(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
@@ -426,8 +452,107 @@ async function openThreadInCodex(threadId: string, label: string): Promise<void>
   }
 }
 
+async function copyDeepLink(target: DesktopNavigationTarget, label: string): Promise<void> {
+  try {
+    await api.copyDeepLink(target);
+    toast('Enlace copiado.');
+    announce(`Enlace de ${label} copiado.`);
+  } catch (error) {
+    const message = errorText(error);
+    toast(message, true);
+    announce('No se pudo copiar el enlace.');
+  }
+}
+
+function renderRecentMessages(messages: RecentMessage[]): void {
+  const fragment = document.createDocumentFragment();
+  for (const message of messages) {
+    const item = document.createElement('li');
+    item.className = 'context-message';
+    item.dataset.role = message.role;
+    const header = document.createElement('header');
+    const role = document.createElement('strong');
+    role.textContent = message.role === 'user' ? 'Usuario' : 'Codex';
+    const turn = document.createElement('code');
+    turn.textContent = message.turnId;
+    const text = document.createElement('p');
+    text.textContent = message.text;
+    header.append(role, turn);
+    item.append(header, text);
+    fragment.append(item);
+  }
+  ui.contextMessageList.replaceChildren(fragment);
+  ui.contextEmpty.hidden = messages.length > 0;
+  ui.contextEmpty.textContent = messages.length === 0 ? 'Esta sesión no tiene mensajes recientes visibles.' : '';
+}
+
+async function loadRecentContext(): Promise<void> {
+  const target = contextTarget;
+  if (!target) return;
+  const generation = ++contextGeneration;
+  ui.contextRefreshButton.disabled = true;
+  ui.contextStatus.textContent = 'Consultando Codex Desktop…';
+  ui.contextEmpty.hidden = false;
+  ui.contextEmpty.textContent = 'Cargando contexto reciente…';
+  ui.contextMessageList.replaceChildren();
+  try {
+    const messages = await api.recentMessages({
+      threadId: target.threadId,
+      workspace: target.workspace,
+      binary: target.binary,
+    });
+    if (generation !== contextGeneration || contextTarget?.threadId !== target.threadId) return;
+    renderRecentMessages(messages);
+    ui.contextStatus.textContent = `${messages.length} mensajes · solo en memoria de esta vista`;
+  } catch (error) {
+    if (generation !== contextGeneration) return;
+    ui.contextEmpty.hidden = false;
+    ui.contextEmpty.textContent = errorText(error);
+    ui.contextStatus.textContent = 'No se pudo consultar el contexto.';
+  } finally {
+    if (generation === contextGeneration) ui.contextRefreshButton.disabled = false;
+  }
+}
+
+function openRecentContext(
+  threadId: string,
+  workspace: string | null,
+  label: string,
+  binary = currentBinary(),
+): void {
+  contextTarget = { threadId, workspace, binary, label };
+  ui.contextSource.textContent = `${label} · ${threadId}`;
+  if (!ui.contextDialog.open) ui.contextDialog.showModal();
+  void loadRecentContext();
+}
+
+function clearRecentContext(): void {
+  contextGeneration += 1;
+  contextTarget = null;
+  ui.contextMessageList.replaceChildren();
+  ui.contextSource.textContent = '—';
+  ui.contextEmpty.hidden = false;
+  ui.contextEmpty.textContent = 'Selecciona una sesión para consultar su contexto.';
+  ui.contextStatus.textContent = 'El contenido se elimina de esta vista al cerrar.';
+}
+
+function closeRecentContext(): void {
+  if (ui.contextDialog.open) ui.contextDialog.close();
+  else clearRecentContext();
+}
+
 function runIsBusy(runId: string): boolean {
   return [...pendingOperations.values()].some((pendingRunId) => pendingRunId === runId);
+}
+
+function resumeActionLabel(run: RunState, busy: boolean): string {
+  if (busy) return 'En curso';
+  if (run.status === 'paused') return 'Reanudar';
+  if (run.status === 'failed') return 'Reintentar';
+  if (run.status === 'blocked') return 'Revisar y reanudar';
+  if (run.status === 'completed') return 'Completada';
+  if (run.status === 'budgetLimited') return 'Límite alcanzado';
+  return 'Recuperar';
 }
 
 function renderSelectedRun(): void {
@@ -472,7 +597,10 @@ function renderSelectedRun(): void {
 
   const busy = runIsBusy(run.runId);
   ui.pauseButton.disabled = !busy || !isActive(run.status);
-  ui.resumeButton.disabled = busy || run.status === 'completed';
+  ui.resumeButton.disabled = busy || run.status === 'completed' || run.status === 'budgetLimited';
+  ui.resumeButtonLabel.textContent = resumeActionLabel(run, busy);
+  ui.copyRunLinkButton.disabled = false;
+  ui.runContextButton.disabled = run.threadId === null;
   renderVerification(run);
 }
 
@@ -540,7 +668,7 @@ async function runDoctor(showToast = true): Promise<void> {
   try {
     const result = await api.doctor({
       workspace: ui.workspaceInput.value.trim() || null,
-      binary: ui.binaryInput.value.trim() || chosenBinary,
+      binary: currentBinary(),
     });
     doctorResult = result;
     chosenBinary = ui.binaryInput.value.trim() || chosenBinary;
@@ -596,7 +724,7 @@ async function activateExistingGoal(session: DesktopSessionInfo): Promise<void> 
       network: false,
       dangerFullAccess: false,
       dangerConfirmation: false,
-      binary: ui.binaryInput.value.trim() || chosenBinary,
+      binary: currentBinary(),
     });
     if (!pendingOperations.has(receipt.operationId) && !settledOperations.has(receipt.operationId)) {
       pendingOperations.set(receipt.operationId, null);
@@ -649,9 +777,12 @@ function renderThreads(): void {
     && activeElement.classList.contains('session-state')
     ? activeElement.dataset.threadId ?? null
     : null;
-  const focusedOpenThreadId = activeElement instanceof HTMLButtonElement
-    && activeElement.classList.contains('session-open-button')
+  const focusedActionThreadId = activeElement instanceof HTMLButtonElement
+    && activeElement.classList.contains('session-inline-button')
     ? activeElement.dataset.threadId ?? null
+    : null;
+  const focusedAction = focusedActionThreadId && activeElement instanceof HTMLButtonElement
+    ? activeElement.dataset.action ?? null
     : null;
   if (pendingSwitchFocusThreadId && focusedStateThreadId !== pendingSwitchFocusThreadId) {
     pendingSwitchFocusThreadId = null;
@@ -662,6 +793,10 @@ function renderThreads(): void {
     const { thread } = session;
     const item = document.createElement('li');
     item.className = 'session-item';
+    item.classList.toggle('is-selected', thread.id === selectedSessionThreadId);
+    item.dataset.threadId = thread.id;
+    item.tabIndex = -1;
+    item.setAttribute('aria-current', thread.id === selectedSessionThreadId ? 'true' : 'false');
     const content = document.createElement('div');
     const title = document.createElement('strong');
     title.className = 'session-title';
@@ -677,13 +812,38 @@ function renderThreads(): void {
     const toggle = document.createElement('button');
     const actions = document.createElement('div');
     actions.className = 'session-actions';
+    const inlineActions = document.createElement('div');
+    inlineActions.className = 'session-inline-actions';
     const openButton = document.createElement('button');
     openButton.type = 'button';
-    openButton.className = 'text-button session-open-button';
+    openButton.className = 'text-button session-inline-button session-open-button';
     openButton.dataset.threadId = thread.id;
+    openButton.dataset.action = 'open';
     openButton.textContent = 'Abrir en Codex';
     openButton.setAttribute('aria-label', `Abrir ${title.textContent} en Codex Desktop`);
     openButton.addEventListener('click', () => { void openThreadInCodex(thread.id, title.textContent ?? 'Sesión'); });
+    const contextButton = document.createElement('button');
+    contextButton.type = 'button';
+    contextButton.className = 'text-button session-inline-button session-context-button';
+    contextButton.dataset.threadId = thread.id;
+    contextButton.dataset.action = 'context';
+    contextButton.textContent = 'Contexto';
+    contextButton.setAttribute('aria-label', `Ver contexto reciente de ${title.textContent}`);
+    contextButton.addEventListener('click', () => {
+      selectedSessionThreadId = thread.id;
+      renderThreads();
+      openRecentContext(thread.id, thread.cwd, title.textContent ?? 'Sesión');
+    });
+    const copyButton = document.createElement('button');
+    copyButton.type = 'button';
+    copyButton.className = 'text-button session-inline-button session-copy-button';
+    copyButton.dataset.threadId = thread.id;
+    copyButton.dataset.action = 'copy';
+    copyButton.textContent = 'Copiar enlace';
+    copyButton.setAttribute('aria-label', `Copiar enlace de ${title.textContent}`);
+    copyButton.addEventListener('click', () => {
+      void copyDeepLink({ kind: 'session', id: thread.id }, title.textContent ?? 'la sesión');
+    });
     const checked = session.operationActive || session.goal?.status === 'active';
     toggle.type = 'button';
     toggle.className = 'session-switch';
@@ -701,16 +861,18 @@ function renderThreads(): void {
       toggle.setAttribute('aria-describedby', state.id);
     }
     toggle.addEventListener('click', () => { void toggleSession(session); });
-    content.append(title, meta, state);
-    actions.append(openButton, toggle);
+    inlineActions.append(contextButton, copyButton, openButton);
+    content.append(title, meta, state, inlineActions);
+    actions.append(toggle);
     item.append(content, actions);
     fragment.append(item);
   }
   ui.threadList.replaceChildren(fragment);
-  if (focusedOpenThreadId) {
-    const focusedOpen = [...ui.threadList.querySelectorAll<HTMLButtonElement>('.session-open-button')]
-      .find((candidate) => candidate.dataset.threadId === focusedOpenThreadId);
-    focusedOpen?.focus({ preventScroll: true });
+  if (focusedActionThreadId && focusedAction) {
+    const focusedReplacement = [...ui.threadList.querySelectorAll<HTMLButtonElement>('.session-inline-button')]
+      .find((candidate) => candidate.dataset.threadId === focusedActionThreadId
+        && candidate.dataset.action === focusedAction);
+    focusedReplacement?.focus({ preventScroll: true });
   } else if (focusedThreadId) {
     const focusedSwitch = [...ui.threadList.querySelectorAll<HTMLButtonElement>('.session-switch')]
       .find((candidate) => candidate.dataset.threadId === focusedThreadId);
@@ -747,19 +909,29 @@ function refreshThreads(quiet = false): Promise<void> {
       do {
         sessionsReconcileAgain = false;
         const generation = sessionsRefreshGeneration;
+        const selectedThreadId = selectedSessionThreadId;
+        const binary = currentBinary();
         try {
           const nextSessions = await api.listSessions({
             workspace: null,
-            binary: ui.binaryInput.value.trim() || chosenBinary,
+            binary,
             limit: 50,
           });
-          if (generation !== sessionsRefreshGeneration) continue;
-          sessions = nextSessions;
+          const reconciled = await reconcileSelectedSession(
+            nextSessions,
+            selectedThreadId,
+            (threadId) => api.getSession({ threadId, workspace: null, binary }),
+            () => generation === sessionsRefreshGeneration
+              && selectedSessionThreadId === selectedThreadId
+              && currentBinary() === binary,
+          );
+          if (reconciled === null) continue;
+          sessions = reconciled;
           renderThreads();
           if (!sessionsPendingQuiet) announce(`${sessions.length} sesiones de Desktop actualizadas.`);
           sessionsPendingQuiet = true;
         } catch (error) {
-          if (generation !== sessionsRefreshGeneration) continue;
+          if (generation !== sessionsRefreshGeneration || currentBinary() !== binary) continue;
           const message = errorText(error);
           sessions = [];
           ui.threadList.replaceChildren();
@@ -781,6 +953,71 @@ function refreshThreads(quiet = false): Promise<void> {
 
   sessionsRefreshInFlight = Promise.resolve().then(reconcile);
   return sessionsRefreshInFlight;
+}
+
+function focusSelectedSession(): void {
+  window.requestAnimationFrame(() => {
+    const item = [...ui.threadList.querySelectorAll<HTMLElement>('.session-item')]
+      .find((candidate) => candidate.dataset.threadId === selectedSessionThreadId);
+    if (!item) return;
+    item.scrollIntoView({ block: 'nearest' });
+    item.focus({ preventScroll: true });
+  });
+}
+
+async function handleNavigationTarget(target: DesktopNavigationTarget): Promise<void> {
+  if (target.kind === 'run') {
+    let run = runs.find((candidate) => candidate.runId === target.id) ?? null;
+    if (!run) {
+      try {
+        run = await api.getRun(target.id);
+        upsertRun(run);
+      } catch {
+        toast('La ejecución referenciada no está disponible en este equipo.', true);
+        announce('No se encontró la ejecución del enlace.');
+        return;
+      }
+    }
+    selectedRunId = run.runId;
+    render();
+    setActiveTab('inspector');
+    ui.runMain.focus({ preventScroll: true });
+    announce(`Ejecución ${run.name} seleccionada desde el enlace.`);
+    return;
+  }
+
+  selectedSessionThreadId = target.id;
+  setActiveTab('sessions');
+  await refreshThreads(true);
+  let session = sessions.find((candidate) => candidate.thread.id === target.id) ?? null;
+  if (!session) {
+    try {
+      session = await api.getSession({
+        threadId: target.id,
+        workspace: null,
+        binary: currentBinary(),
+      });
+      sessions = [session, ...sessions.filter((candidate) => candidate.thread.id !== target.id)];
+    } catch {
+      toast('La sesión referenciada no está disponible en Codex Desktop.', true);
+      announce('No se encontró la sesión del enlace.');
+      return;
+    }
+  }
+  renderThreads();
+  focusSelectedSession();
+  announce(`Sesión ${session.thread.name ?? session.thread.preview ?? session.thread.id} seleccionada desde el enlace.`);
+}
+
+function scheduleNavigation(target: DesktopNavigationTarget): Promise<void> {
+  navigationChain = navigationChain
+    .catch(() => undefined)
+    .then(() => handleNavigationTarget(target))
+    .catch((error: unknown) => {
+      toast(errorText(error), true);
+      announce('No se pudo completar la navegación del enlace.');
+    });
+  return navigationChain;
 }
 
 function effortValue(value: string | null | undefined): Effort | null {
@@ -906,7 +1143,7 @@ function refreshModels(quiet = false): Promise<void> {
     try {
       const nextModels = await api.listModels({
         workspace: ui.workspaceInput.value.trim() || null,
-        binary: ui.binaryInput.value.trim() || chosenBinary,
+        binary: currentBinary(),
       });
       models = nextModels;
       renderModelOptions();
@@ -1033,7 +1270,7 @@ async function addDroppedFiles(files: FileList): Promise<void> {
 function openGoalDialog(session: DesktopSessionInfo | null = null): void {
   attachSession = session;
   const workspace = session?.thread.cwd ?? selectedRun()?.workspace ?? ui.workspaceInput.value;
-  const binary = ui.binaryInput.value || chosenBinary || '';
+  const binary = currentBinary() ?? '';
   ui.form.reset();
   ui.workspaceInput.value = workspace;
   ui.binaryInput.value = binary;
@@ -1123,7 +1360,7 @@ function startInput(): StartRunInput {
     network: ui.networkInput.checked,
     dangerFullAccess: ui.dangerFullAccess.checked,
     dangerConfirmation: ui.dangerFullAccess.checked && ui.dangerConfirmation.checked,
-    binary: ui.binaryInput.value.trim() || null,
+    binary: currentBinary(),
   };
 }
 
@@ -1215,8 +1452,16 @@ function updateResumeDangerConfirmation(): void {
 
 function openResumeDialog(): void {
   const run = selectedRun();
-  if (!run || runIsBusy(run.runId) || run.status === 'completed') return;
+  if (!run || runIsBusy(run.runId) || run.status === 'completed' || run.status === 'budgetLimited') return;
   resumeRunId = run.runId;
+  ui.resumeDialogTitle.textContent = run.status === 'failed' ? 'Reintentar objetivo'
+    : run.status === 'blocked' ? 'Revisar y reanudar objetivo'
+      : run.status === 'paused' ? 'Reanudar objetivo' : 'Recuperar objetivo';
+  ui.resumeDialogDescription.textContent = run.status === 'blocked'
+    ? 'Revisa el motivo del bloqueo. Al confirmar, se reconoce esa evidencia y se intenta continuar con permisos nuevos.'
+    : run.status === 'failed'
+      ? 'El fallo queda registrado. Al confirmar, se reconoce el turno detenido y se intenta continuar con permisos nuevos.'
+      : 'Los permisos y comandos anteriores no se reutilizan. Autoriza solo lo necesario para esta reanudación.';
   ui.resumeForm.reset();
   updateResumeDangerConfirmation();
   setResumeFormError(null);
@@ -1251,7 +1496,7 @@ async function resumeSelectedRun(event: SubmitEvent): Promise<void> {
       network: ui.resumeNetwork.checked,
       dangerFullAccess: ui.resumeFullAccess.checked,
       dangerConfirmation: ui.resumeFullAccess.checked && ui.resumeDangerConfirmation.checked,
-      binary: chosenBinary,
+      binary: currentBinary(),
     });
     if (!pendingOperations.has(receipt.operationId) && !settledOperations.has(receipt.operationId)) {
       pendingOperations.set(receipt.operationId, run.runId);
@@ -1325,6 +1570,9 @@ function handleDesktopEvent(event: DesktopEvent): void {
     case 'log':
       appendLog(event.level, event.message, event.timestamp);
       break;
+    case 'navigation-requested':
+      void scheduleNavigation(event.target);
+      break;
   }
 }
 
@@ -1383,6 +1631,10 @@ function wireEvents(): () => void {
   ui.resumeCancelButton.addEventListener('click', closeResumeDialog);
   ui.resumeForm.addEventListener('submit', (event) => { void resumeSelectedRun(event); });
   ui.resumeFullAccess.addEventListener('change', updateResumeDangerConfirmation);
+  ui.contextCloseButton.addEventListener('click', closeRecentContext);
+  ui.contextDoneButton.addEventListener('click', closeRecentContext);
+  ui.contextRefreshButton.addEventListener('click', () => { void loadRecentContext(); });
+  ui.contextDialog.addEventListener('close', clearRecentContext);
   ui.objectiveInput.addEventListener('input', () => {
     ui.objectiveCount.textContent = `${numberFormatter.format(ui.objectiveInput.value.length)} caracteres`;
   });
@@ -1423,6 +1675,16 @@ function wireEvents(): () => void {
     const run = selectedRun();
     if (run?.threadId) void openThreadInCodex(run.threadId, run.name || 'Sesión');
   });
+  ui.copyRunLinkButton.addEventListener('click', () => {
+    const run = selectedRun();
+    if (run) void copyDeepLink({ kind: 'run', id: run.runId }, run.name || 'la ejecución');
+  });
+  ui.runContextButton.addEventListener('click', () => {
+    const run = selectedRun();
+    if (run?.threadId) {
+      openRecentContext(run.threadId, run.workspace, run.name || 'Ejecución', currentBinary());
+    }
+  });
   ui.resumeButton.addEventListener('click', openResumeDialog);
   ui.pauseButton.addEventListener('click', () => { void pauseSelectedRun(); });
   ui.clearLogsButton.addEventListener('click', clearLogs);
@@ -1453,7 +1715,14 @@ async function initialize(): Promise<void> {
     ui.systemVersion.textContent = 'Versión no disponible';
     appendLog('warn', `Sistema: ${errorText(error)}`);
   }
-  await Promise.all([refreshRuns(true), runDoctor(false)]);
+  await refreshRuns(true);
+  try {
+    const initialTargets = await api.navigationReady();
+    for (const target of initialTargets) await scheduleNavigation(target);
+  } catch (error) {
+    appendLog('warn', `Navegación: ${errorText(error)}`);
+  }
+  await runDoctor(false);
 }
 
 const unsubscribe = wireEvents();

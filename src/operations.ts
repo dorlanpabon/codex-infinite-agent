@@ -1,6 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
-import { CodexDesktopClient, type GoalInfo, type ModelInfo, type ThreadInfo } from './app-server/client.js';
+import { CodexDesktopClient, type GoalInfo, type ModelInfo, type RecentMessage, type ThreadInfo } from './app-server/client.js';
 import { discoverCodexBinary, type BinaryInfo } from './app-server/binary.js';
 import { JsonRpcProcess } from './app-server/rpc.js';
 import { validateAttachmentPaths } from './attachments.js';
@@ -276,6 +276,7 @@ export async function attachGoal(
       );
     }
     const baseline = await resolveGitWorkspace(thread.cwd, 120_000, signal);
+    const initialTurns = await client.listRecentTurns(thread.id, 1);
     const dangerFullAccess = options.dangerFullAccess === true;
     const objective = remoteGoal?.objective ?? requestedObjective;
     const attachments = remoteGoal ? [] : await validateAttachmentPaths(options.attachments ?? []);
@@ -302,6 +303,7 @@ export async function attachGoal(
       gitBaseline: baseline,
     });
     state.threadId = thread.id;
+    state.turnBaselineId = initialTurns.at(-1)?.turnId ?? null;
     state.nativeGoalStatus = remoteGoal?.status ?? null;
     state.nativeGoalCreatedAt = remoteGoal?.createdAt ?? null;
     state.goalTokenBudget = remoteGoal?.tokenBudget ?? requestedTokenBudget;
@@ -332,14 +334,8 @@ export async function attachGoal(
       throw new AppError('GOAL_OWNERSHIP_MISMATCH', 'El Goal cambio mientras se esperaba el turno activo; no se modificara.');
     }
 
-    const priorTurns = await client.listTurns(thread.id, 1001);
-    if (priorTurns.length + requestedTurns > 1000) {
-      throw new AppError('GOAL_BUDGET_EXHAUSTED', 'La sesion tiene demasiados turnos previos para reservar el limite solicitado.');
-    }
-    state.observedTurnIds = priorTurns.map((turn) => turn.turnId);
-    state.acknowledgedBlockingTurnIds = [...state.observedTurnIds];
-    state.turnCount = state.observedTurnIds.length;
-    state.maxTurns = state.turnCount + requestedTurns;
+    const priorTurns = await client.listRecentTurns(thread.id, 1);
+    state.turnBaselineId = priorTurns.at(-1)?.turnId ?? null;
 
     await saveRun(state);
     notify(hooks, state, logger);
@@ -436,6 +432,21 @@ export async function listDesktopModels(
   }
 }
 
+export async function listRecentDesktopMessages(
+  workspace: string | null,
+  threadId: string,
+  explicitBinary: string | null,
+  logger: Logger,
+): Promise<RecentMessage[]> {
+  const cwd = path.resolve(workspace ?? os.homedir());
+  const { client } = await openClient(cwd, explicitBinary, logger);
+  try {
+    return await client.listRecentMessages(threadId, 10);
+  } finally {
+    await client.close();
+  }
+}
+
 export async function listDesktopSessions(
   workspace: string | null,
   limit: number,
@@ -455,41 +466,68 @@ export async function listDesktopSessions(
       .filter((run) => activeRunIds.has(run.runId))
       .map((run) => [normalizedPath(run.workspace), run.runId]));
 
-    return await Promise.all(threads.map(async (thread): Promise<DesktopSessionInfo> => {
-      let goal: GoalInfo | null = null;
-      let goalError: string | null = null;
-      try {
-        goal = await client.getGoal(thread.id);
-      } catch (error) {
-        goalError = sanitizeLog(errorMessage(error), 1000);
-      }
-      const localRun = runByThread.get(thread.id) ?? null;
-      const operationActive = localRun !== null && activeRunIds.has(localRun.runId);
-      const workspaceOwner = activeWorkspace.get(normalizedPath(thread.cwd));
-      let unavailableReason: string | null = null;
-      if (goalError) unavailableReason = 'No se pudo confirmar el Goal remoto.';
-      else if (!attachableThread(thread)) unavailableReason = 'Solo se pueden administrar sesiones interactivas persistidas.';
-      else if (workspaceOwner && workspaceOwner !== localRun?.runId) unavailableReason = 'Otro objetivo ya administra este workspace.';
-      else if (!localRun && goal !== null && !attachableGoal(goal)) {
-        unavailableReason = goal.status === 'active'
-          ? 'Este Goal esta activo fuera de esta instancia.'
-          : `El Goal remoto esta ${goal.status}.`;
-      } else if (localRun?.status === 'completed') unavailableReason = 'La ejecucion local ya esta completa.';
+    return await Promise.all(threads.map((thread) => describeDesktopSession(
+      client,
+      thread,
+      runByThread,
+      activeWorkspace,
+      activeRunIds,
+    )));
+  } finally {
+    await client.close();
+  }
+}
 
-      const canDisable = operationActive;
-      const canEnable = !operationActive && unavailableReason === null
-        && (localRun !== null || goal === null || attachableGoal(goal));
-      return {
-        thread,
-        goal,
-        goalError,
-        localRun,
-        operationActive,
-        canEnable,
-        canDisable,
-        unavailableReason,
-      };
-    }));
+async function describeDesktopSession(
+  client: CodexDesktopClient,
+  thread: ThreadInfo,
+  runByThread: ReadonlyMap<string, RunState>,
+  activeWorkspace: ReadonlyMap<string, string>,
+  activeRunIds: ReadonlySet<string>,
+): Promise<DesktopSessionInfo> {
+  let goal: GoalInfo | null = null;
+  let goalError: string | null = null;
+  try {
+    goal = await client.getGoal(thread.id);
+  } catch (error) {
+    goalError = sanitizeLog(errorMessage(error), 1000);
+  }
+  const localRun = runByThread.get(thread.id) ?? null;
+  const operationActive = localRun !== null && activeRunIds.has(localRun.runId);
+  const workspaceOwner = activeWorkspace.get(normalizedPath(thread.cwd));
+  let unavailableReason: string | null = null;
+  if (goalError) unavailableReason = 'No se pudo confirmar el Goal remoto.';
+  else if (!attachableThread(thread)) unavailableReason = 'Solo se pueden administrar sesiones interactivas persistidas.';
+  else if (workspaceOwner && workspaceOwner !== localRun?.runId) unavailableReason = 'Otro objetivo ya administra este workspace.';
+  else if (!localRun && goal !== null && !attachableGoal(goal)) {
+    unavailableReason = goal.status === 'active'
+      ? 'Este Goal esta activo fuera de esta instancia.'
+      : `El Goal remoto esta ${goal.status}.`;
+  } else if (localRun?.status === 'completed') unavailableReason = 'La ejecucion local ya esta completa.';
+  else if (localRun?.status === 'budgetLimited') unavailableReason = 'La ejecucion alcanzo su limite y no puede reanudarse.';
+
+  const canDisable = operationActive;
+  const canEnable = !operationActive && unavailableReason === null
+    && (localRun !== null || goal === null || attachableGoal(goal));
+  return { thread, goal, goalError, localRun, operationActive, canEnable, canDisable, unavailableReason };
+}
+
+export async function getDesktopSession(
+  workspace: string | null,
+  threadId: string,
+  explicitBinary: string | null,
+  logger: Logger,
+  activeRunIds: ReadonlySet<string> = new Set(),
+): Promise<DesktopSessionInfo> {
+  const cwd = path.resolve(workspace ?? os.homedir());
+  const { client } = await openClient(cwd, explicitBinary, logger);
+  try {
+    const [thread, runs] = await Promise.all([client.readThread(threadId), listRuns()]);
+    const runByThread = new Map(runs.filter((run) => run.threadId).map((run) => [run.threadId!, run]));
+    const activeWorkspace = new Map(runs
+      .filter((run) => activeRunIds.has(run.runId))
+      .map((run) => [normalizedPath(run.workspace), run.runId]));
+    return await describeDesktopSession(client, thread, runByThread, activeWorkspace, activeRunIds);
   } finally {
     await client.close();
   }

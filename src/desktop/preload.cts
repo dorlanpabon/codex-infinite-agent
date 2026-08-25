@@ -19,6 +19,10 @@ const CHANNELS = {
   listModels: 'models:list',
   listThreads: 'threads:list',
   listSessions: 'sessions:list',
+  getSession: 'sessions:get',
+  recentMessages: 'sessions:recent-messages',
+  copyDeepLink: 'navigation:copy-deep-link',
+  navigationReady: 'navigation:ready',
   event: 'runs:event',
 } as const;
 
@@ -40,6 +44,10 @@ const api: DesktopApi = {
   listModels: (input) => ipcRenderer.invoke(CHANNELS.listModels, input),
   listThreads: (input) => ipcRenderer.invoke(CHANNELS.listThreads, input),
   listSessions: (input) => ipcRenderer.invoke(CHANNELS.listSessions, input),
+  getSession: (input) => ipcRenderer.invoke(CHANNELS.getSession, input),
+  recentMessages: (input) => ipcRenderer.invoke(CHANNELS.recentMessages, input),
+  copyDeepLink: (target) => ipcRenderer.invoke(CHANNELS.copyDeepLink, target),
+  navigationReady: () => ipcRenderer.invoke(CHANNELS.navigationReady),
   onEvent: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, payload: DesktopEvent): void => listener(payload);
     ipcRenderer.on(CHANNELS.event, handler);

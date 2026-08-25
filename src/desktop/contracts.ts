@@ -1,12 +1,16 @@
 import type { BinaryInfo } from '../app-server/binary.js';
-import type { GoalInfo, ModelInfo, ThreadInfo } from '../app-server/client.js';
+import type { GoalInfo, ModelInfo, RecentMessage, ThreadInfo } from '../app-server/client.js';
 import type { RunState } from '../state.js';
 
-export type { ModelInfo };
+export type { ModelInfo, RecentMessage };
 
-export const DESKTOP_ORIGIN = 'codex-infinite://app';
+export const DESKTOP_ORIGIN = 'codex-infinite-app://app';
 export const EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
 export const MAX_ATTACHMENTS = 100;
+
+export function effectiveDesktopBinary(inputValue: string, fallback: string | null): string | null {
+  return inputValue.trim() || fallback;
+}
 
 export type Effort = typeof EFFORTS[number];
 export type LogLevel = 'info' | 'warn' | 'error' | 'debug';
@@ -53,6 +57,10 @@ export interface ThreadsInput {
   limit: number;
 }
 
+export interface RecentMessagesInput extends DoctorInput {
+  threadId: string;
+}
+
 export interface DesktopSessionInfo {
   thread: ThreadInfo;
   goal: GoalInfo | null;
@@ -62,6 +70,24 @@ export interface DesktopSessionInfo {
   canEnable: boolean;
   canDisable: boolean;
   unavailableReason: string | null;
+}
+
+export async function reconcileSelectedSession(
+  nextSessions: DesktopSessionInfo[],
+  selectedThreadId: string | null,
+  loadExact: (threadId: string) => Promise<DesktopSessionInfo>,
+  isCurrent: () => boolean,
+): Promise<DesktopSessionInfo[] | null> {
+  if (!isCurrent()) return null;
+  if (!selectedThreadId || nextSessions.some((session) => session.thread.id === selectedThreadId)) return nextSessions;
+  let selected: DesktopSessionInfo | null = null;
+  try {
+    selected = await loadExact(selectedThreadId);
+  } catch {
+    // The exact session disappeared; never retain a stale snapshot.
+  }
+  if (!isCurrent()) return null;
+  return selected?.thread.id === selectedThreadId ? [selected, ...nextSessions] : nextSessions;
 }
 
 export interface DoctorResult {
@@ -89,12 +115,18 @@ export interface LocalAttachment {
   size: number;
 }
 
+export interface DesktopNavigationTarget {
+  kind: 'run' | 'session';
+  id: string;
+}
+
 export type DesktopEvent =
   | { type: 'operation-started'; operationId: string; runId: string | null; kind: 'start' | 'attach' | 'resume' | 'pause' }
   | { type: 'run-changed'; operationId: string; run: RunState }
   | { type: 'operation-finished'; operationId: string; run: RunState }
   | { type: 'operation-error'; operationId: string; runId: string | null; error: { code: string; message: string } }
-  | { type: 'log'; operationId: string; level: LogLevel; message: string; timestamp: string };
+  | { type: 'log'; operationId: string; level: LogLevel; message: string; timestamp: string }
+  | { type: 'navigation-requested'; target: DesktopNavigationTarget };
 
 export interface DesktopApi {
   systemInfo(): Promise<SystemInfo>;
@@ -114,6 +146,10 @@ export interface DesktopApi {
   listModels(input: DoctorInput): Promise<ModelInfo[]>;
   listThreads(input: ThreadsInput): Promise<ThreadInfo[]>;
   listSessions(input: ThreadsInput): Promise<DesktopSessionInfo[]>;
+  getSession(input: RecentMessagesInput): Promise<DesktopSessionInfo>;
+  recentMessages(input: RecentMessagesInput): Promise<RecentMessage[]>;
+  copyDeepLink(target: DesktopNavigationTarget): Promise<string>;
+  navigationReady(): Promise<DesktopNavigationTarget[]>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;
 }
 
@@ -218,6 +254,14 @@ export function parseThreadsInput(value: unknown): ThreadsInput {
   return value as unknown as ThreadsInput;
 }
 
+export function parseRecentMessagesInput(value: unknown): RecentMessagesInput {
+  if (!isRecord(value) || !exactKeys(value, ['binary', 'threadId', 'workspace']) || !threadId(value.threadId)) {
+    throw new TypeError('Parametros de contexto reciente invalidos.');
+  }
+  const connection = parseDoctorInput({ binary: value.binary, workspace: value.workspace });
+  return { ...connection, threadId: value.threadId.toLowerCase() };
+}
+
 export function parseRunId(value: unknown): string {
   if (!runId(value)) throw new TypeError('Run ID invalido.');
   return value;
@@ -230,6 +274,39 @@ export function parseThreadId(value: unknown): string {
 
 export function codexThreadDeepLink(value: unknown): string {
   return `codex://threads/${parseThreadId(value).toLowerCase()}`;
+}
+
+export function parseDesktopNavigationTarget(value: unknown): DesktopNavigationTarget {
+  if (!isRecord(value) || !exactKeys(value, ['id', 'kind'])
+    || (value.kind !== 'run' && value.kind !== 'session')) {
+    throw new TypeError('Destino de navegacion invalido.');
+  }
+  const id = value.kind === 'run' ? parseRunId(value.id) : parseThreadId(value.id);
+  return { kind: value.kind, id: id.toLowerCase() };
+}
+
+export function codexInfiniteDeepLink(value: unknown): string {
+  const target = parseDesktopNavigationTarget(value);
+  return `codex-infinite://${target.kind}/${target.id}`;
+}
+
+export function parseCodexInfiniteDeepLink(value: unknown): DesktopNavigationTarget {
+  if (typeof value !== 'string') throw new TypeError('Enlace de Codex Infinite invalido.');
+  const match = /^codex-infinite:\/\/(run|session)\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/iu.exec(value);
+  if (!match) throw new TypeError('Enlace de Codex Infinite invalido.');
+  return parseDesktopNavigationTarget({ kind: match[1], id: match[2] });
+}
+
+export function parseCodexInfiniteDeepLinks(values: readonly string[]): DesktopNavigationTarget[] {
+  const targets: DesktopNavigationTarget[] = [];
+  for (const value of values) {
+    try {
+      targets.push(parseCodexInfiniteDeepLink(value));
+    } catch {
+      // OS launch arguments contain flags and executable paths; only exact deep links are navigation targets.
+    }
+  }
+  return targets;
 }
 
 export function parseAttachmentPaths(value: unknown): string[] {

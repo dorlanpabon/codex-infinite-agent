@@ -143,7 +143,7 @@ test('loadRun rejects a mismatched id and tampered security fields', async (t) =
   await assert.rejects(() => loadRun(state.runId), /incompatible o corrupto|no coincide/);
 });
 
-test('state v2 round-trips bounded native evidence and rejects self-inconsistent saves', async (t) => {
+test('state v3 round-trips bounded native evidence and rejects self-inconsistent saves', async (t) => {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'codex-infinite-schema-'));
   const previous = process.env.CODEX_HOME;
   process.env.CODEX_HOME = temp;
@@ -169,7 +169,7 @@ test('state v2 round-trips bounded native evidence and rejects self-inconsistent
     summary: ['y'.repeat(10_000)],
   };
   await saveRun(state);
-  assert.equal((await loadRun(state.runId)).schemaVersion, 2);
+  assert.equal((await loadRun(state.runId)).schemaVersion, 3);
 
   state.turnCount = 2;
   await assert.rejects(() => saveRun(state), /incompatible o corrupto/);
@@ -198,7 +198,7 @@ test('state persists the full objective and attachment context beyond the native
   assert.deepEqual(await loadRun(state.runId), state);
 });
 
-test('state loader migrates prior v2 runs without attachment metadata', async (t) => {
+test('state loader conservatively migrates prior v2 runs without adoption or attachment metadata', async (t) => {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'codex-infinite-legacy-'));
   const previous = process.env.CODEX_HOME;
   process.env.CODEX_HOME = temp;
@@ -212,12 +212,16 @@ test('state loader migrates prior v2 runs without attachment metadata', async (t
   await saveRun(state);
   const statePath = path.join(temp, 'infinite-agent', 'runs', `${state.runId}.json`);
   const legacy = JSON.parse(await readFile(statePath, 'utf8'));
+  legacy.schemaVersion = 2;
+  delete legacy.turnBaselineId;
   delete legacy.goalObjective;
   delete legacy.attachments;
   delete legacy.contextInjectionStatus;
   await writeFile(statePath, `${JSON.stringify(legacy)}\n`, 'utf8');
 
   const loaded = await loadRun(state.runId);
+  assert.equal(loaded.schemaVersion, 3);
+  assert.equal(loaded.turnBaselineId, null);
   assert.equal(loaded.goalObjective, loaded.objective);
   assert.deepEqual(loaded.attachments, []);
   assert.equal(loaded.contextInjectionStatus, 'notRequired');

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   ipcMain,
   Menu,
@@ -15,22 +16,35 @@ import {
 import squirrelStartup from 'electron-squirrel-startup';
 import { errorMessage } from '../errors.js';
 import { sanitizeLog, type Logger } from '../log.js';
-import { doctorDesktop, listDesktopModels, listDesktopSessions, listDesktopThreads } from '../operations.js';
+import {
+  doctorDesktop,
+  listDesktopModels,
+  listDesktopSessions,
+  listDesktopThreads,
+  getDesktopSession,
+  listRecentDesktopMessages,
+} from '../operations.js';
 import { listRuns, loadRun } from '../state.js';
 import {
   DESKTOP_ORIGIN,
+  codexInfiniteDeepLink,
   codexThreadDeepLink,
   parseAttachRunInput,
   parseAttachmentPaths,
   parseDoctorInput,
+  parseCodexInfiniteDeepLinks,
+  parseDesktopNavigationTarget,
+  parseRecentMessagesInput,
   parseResumeRunInput,
   parseRunId,
   parseStartRunInput,
   parseThreadsInput,
   type DesktopEvent,
+  type DesktopNavigationTarget,
   type LocalAttachment,
   type LogLevel,
 } from './contracts.js';
+import { DesktopNavigationQueue } from './navigation.js';
 import { RunManager } from './run-manager.js';
 
 const CHANNELS = {
@@ -50,6 +64,10 @@ const CHANNELS = {
   listModels: 'models:list',
   listThreads: 'threads:list',
   listSessions: 'sessions:list',
+  getSession: 'sessions:get',
+  recentMessages: 'sessions:recent-messages',
+  copyDeepLink: 'navigation:copy-deep-link',
+  navigationReady: 'navigation:ready',
   event: 'runs:event',
 } as const;
 
@@ -65,9 +83,11 @@ const rendererFiles = new Map<string, { file: string; contentType: string }>([
 let mainWindow: BrowserWindow | null = null;
 let allowQuit = false;
 let stopping = false;
+let desktopReady = false;
+const navigationQueue = new DesktopNavigationQueue();
 
 protocol.registerSchemesAsPrivileged([{
-  scheme: 'codex-infinite',
+  scheme: 'codex-infinite-app',
   privileges: { standard: true, secure: true, supportFetchAPI: false, corsEnabled: false },
 }]);
 app.enableSandbox();
@@ -77,6 +97,48 @@ function sendEvent(event: DesktopEvent): void {
 }
 
 const runManager = new RunManager(sendEvent);
+
+function focusMainWindow(): void {
+  if (!desktopReady) return;
+  if (!mainWindow) mainWindow = createWindow();
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function flushNavigationQueue(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  for (const target of navigationQueue.takeReady()) {
+    sendEvent({ type: 'navigation-requested', target });
+  }
+}
+
+function receiveDeepLinks(arguments_: readonly string[]): boolean {
+  const targets = parseCodexInfiniteDeepLinks(arguments_);
+  for (const target of targets) navigationQueue.enqueue(target);
+  if (targets.length === 0) return false;
+  focusMainWindow();
+  flushNavigationQueue();
+  return true;
+}
+
+function registerOperatingSystemProtocol(): void {
+  if (process.defaultApp && process.argv[1]) {
+    app.setAsDefaultProtocolClient('codex-infinite', process.execPath, [path.resolve(process.argv[1])]);
+    return;
+  }
+  app.setAsDefaultProtocolClient('codex-infinite');
+}
+
+function handleSquirrelProtocolLifecycle(): void {
+  if (!squirrelStartup || process.platform !== 'win32') return;
+  const command = process.argv[1];
+  if (command === '--squirrel-install' || command === '--squirrel-updated') {
+    app.setAsDefaultProtocolClient('codex-infinite');
+  } else if (command === '--squirrel-uninstall') {
+    app.removeAsDefaultProtocolClient('codex-infinite');
+  }
+}
 
 async function inspectAttachmentPaths(raw: unknown): Promise<LocalAttachment[]> {
   const paths = parseAttachmentPaths(raw);
@@ -209,10 +271,41 @@ function registerHandlers(): void {
       runManager.activeRunIds,
     );
   });
+  ipcMain.handle(CHANNELS.getSession, async (event, raw: unknown) => {
+    assertTrustedSender(event);
+    const input = parseRecentMessagesInput(raw);
+    return getDesktopSession(
+      input.workspace,
+      input.threadId,
+      input.binary,
+      ipcLogger('session'),
+      runManager.activeRunIds,
+    );
+  });
+  ipcMain.handle(CHANNELS.recentMessages, async (event, raw: unknown) => {
+    assertTrustedSender(event);
+    const input = parseRecentMessagesInput(raw);
+    return listRecentDesktopMessages(
+      input.workspace,
+      input.threadId,
+      input.binary,
+      ipcLogger('recent-context'),
+    );
+  });
+  ipcMain.handle(CHANNELS.copyDeepLink, (event, raw: unknown) => {
+    assertTrustedSender(event);
+    const deepLink = codexInfiniteDeepLink(parseDesktopNavigationTarget(raw));
+    clipboard.writeText(deepLink);
+    return deepLink;
+  });
+  ipcMain.handle(CHANNELS.navigationReady, (event) => {
+    assertTrustedSender(event);
+    return navigationQueue.markRendererReady();
+  });
 }
 
 async function registerRendererProtocol(): Promise<void> {
-  await protocol.handle('codex-infinite', async (request) => {
+  await protocol.handle('codex-infinite-app', async (request) => {
     const url = new URL(request.url);
     if (url.host !== 'app') return new Response('Not found', { status: 404 });
     const resource = rendererFiles.get(url.pathname);
@@ -234,6 +327,7 @@ async function registerRendererProtocol(): Promise<void> {
 }
 
 function createWindow(): BrowserWindow {
+  navigationQueue.resetRenderer();
   const window = new BrowserWindow({
     width: 1380,
     height: 860,
@@ -253,6 +347,7 @@ function createWindow(): BrowserWindow {
     },
   });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  window.webContents.on('did-start-loading', () => navigationQueue.resetRenderer());
   window.webContents.on('will-navigate', (event, url) => {
     if (!url.startsWith(`${DESKTOP_ORIGIN}/`)) event.preventDefault();
   });
@@ -270,14 +365,20 @@ function createWindow(): BrowserWindow {
 }
 
 const hasSingleInstanceLock = !squirrelStartup && app.requestSingleInstanceLock();
+const startupArguments = squirrelStartup ? [] : [...process.argv];
+handleSquirrelProtocolLifecycle();
+
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  receiveDeepLinks([url]);
+});
+
 if (squirrelStartup || !hasSingleInstanceLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
-    if (!mainWindow) mainWindow = createWindow();
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
+  app.on('second-instance', (_event, commandLine) => {
+    receiveDeepLinks(commandLine);
+    focusMainWindow();
   });
 
   app.on('web-contents-created', (_event, contents) => {
@@ -290,18 +391,17 @@ if (squirrelStartup || !hasSingleInstanceLock) {
     session.defaultSession.setPermissionCheckHandler(() => false);
     await registerRendererProtocol();
     registerHandlers();
+    registerOperatingSystemProtocol();
+    desktopReady = true;
     mainWindow = createWindow();
+    receiveDeepLinks(startupArguments);
   }).catch((error) => {
     process.stderr.write(`${sanitizeLog(errorMessage(error))}\n`);
     app.exit(1);
   });
 
   app.on('activate', () => {
-    if (!mainWindow) mainWindow = createWindow();
-    else {
-      mainWindow.show();
-      mainWindow.focus();
-    }
+    focusMainWindow();
   });
 
   app.on('window-all-closed', () => {

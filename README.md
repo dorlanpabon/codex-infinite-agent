@@ -17,7 +17,7 @@ La [página de releases](https://github.com/dorlanpabon/codex-infinite-agent/rel
 | Debian/Ubuntu | x64 y arm64 | `Codex-Infinite-<version>-linux-<arch>.deb` |
 | Fedora/RHEL | x64 y arm64 | `Codex-Infinite-<version>-linux-<arch>.rpm` |
 
-La versión estable `0.5.0` se distribuye sin certificado comercial de Windows ni firma o notarización de Apple. SmartScreen o Gatekeeper pueden mostrar una advertencia. Comprueba siempre el archivo `SHA256SUMS.txt` de la release antes de instalar y no aceptes un binario obtenido fuera de GitHub Releases.
+La versión estable `0.6.0` se distribuye sin certificado comercial de Windows ni firma o notarización de Apple. SmartScreen o Gatekeeper pueden mostrar una advertencia. Comprueba siempre el archivo `SHA256SUMS.txt` de la release antes de instalar y no aceptes un binario obtenido fuera de GitHub Releases.
 
 Cada artefacto y `SHA256SUMS.txt` incluye procedencia firmada por GitHub/Sigstore. Puedes verificarla con `gh attestation verify <archivo> -R dorlanpabon/codex-infinite-agent`; esto acredita el workflow y commit de origen, pero no reemplaza Authenticode ni la notarización de Apple.
 

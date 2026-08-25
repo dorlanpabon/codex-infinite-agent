@@ -17,7 +17,7 @@ La [página de releases](https://github.com/dorlanpabon/codex-infinite-agent/rel
 | Debian/Ubuntu | x64 y arm64 | `Codex-Infinite-<version>-linux-<arch>.deb` |
 | Fedora/RHEL | x64 y arm64 | `Codex-Infinite-<version>-linux-<arch>.rpm` |
 
-La versión `0.3.1` se distribuye como preview sin certificado comercial de Windows ni notarización de Apple. SmartScreen o Gatekeeper pueden mostrar una advertencia. Comprueba siempre el archivo `SHA256SUMS.txt` de la release antes de instalar y no aceptes un binario obtenido fuera de GitHub Releases.
+La versión `0.4.0` se distribuye como preview sin certificado comercial de Windows ni notarización de Apple. SmartScreen o Gatekeeper pueden mostrar una advertencia. Comprueba siempre el archivo `SHA256SUMS.txt` de la release antes de instalar y no aceptes un binario obtenido fuera de GitHub Releases.
 
 El companion requiere que Codex Desktop esté instalado y que la sesión de ChatGPT esté iniciada. No incluye, copia ni solicita credenciales de OpenAI.
 
@@ -131,7 +131,7 @@ Si no puede confirmarse el cierre de un proceso o del estado remoto, el lock que
 - macOS Apple Silicon: bundle firmado en `/Applications/ChatGPT.app`; cierre normal mediante grupo de procesos.
 - Linux x64/arm64: paquete oficial instalado en `/usr/lib/chatgpt`; cierre normal mediante grupo de procesos.
 
-Las operaciones Goal requieren `experimentalApi` del App Server y pueden cambiar entre versiones de Desktop. `doctor` valida transporte y autenticación, no la ejecución completa de `thread/goal/*`. La CI multiplataforma usa mocks y empaqueta la interfaz, pero no sustituye un smoke autenticado de Desktop. La preview `0.3.1` aún requiere, con cuota disponible, un smoke autenticado que confirme la ejecución end-to-end de la herramienta Goal nativa `update_goal`; por eso no se presenta como una release estable. El paquete permanece privado para npm y se distribuye únicamente mediante instaladores de GitHub Releases.
+Las operaciones Goal requieren `experimentalApi` del App Server y pueden cambiar entre versiones de Desktop. `doctor` valida transporte y autenticación, no la ejecución completa de `thread/goal/*`. La CI multiplataforma usa mocks y empaqueta la interfaz, pero no sustituye un smoke autenticado de Desktop. La preview `0.4.0` aún requiere, con cuota disponible, un smoke autenticado que confirme la ejecución end-to-end de la herramienta Goal nativa `update_goal`; por eso no se presenta como una release estable. El paquete permanece privado para npm y se distribuye únicamente mediante instaladores de GitHub Releases.
 
 ## Desarrollo
 

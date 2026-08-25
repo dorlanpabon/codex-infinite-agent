@@ -89,11 +89,41 @@ try {
   assert.equal(await window.locator('#goal-dialog').evaluate((dialog) => dialog.open), true);
   assert.equal(await window.locator('#goal-network').isChecked(), false);
   assert.equal(await window.locator('#goal-full-access').isChecked(), false);
+  await window.locator('#advanced-settings summary').click();
+  await window.waitForFunction(() => !document.querySelector('#models-refresh-button')?.hasAttribute('disabled'));
+  const modelSnapshot = await window.evaluate(() => {
+    const options = [...document.querySelectorAll('#goal-model-options option')];
+    const nativeDefault = options.find((option) => option.label.includes('Predeterminado'));
+    return {
+      current: document.querySelector('#goal-model')?.value ?? '',
+      defaultValue: nativeDefault?.value ?? '',
+      effort: document.querySelector('#goal-effort')?.value ?? '',
+      help: document.querySelector('#model-help')?.textContent ?? '',
+      optionCount: options.length,
+      submitDisabled: document.querySelector('#goal-submit-button')?.disabled,
+    };
+  });
+  assert.equal(modelSnapshot.submitDisabled, false);
+  if (modelSnapshot.optionCount > 0) {
+    assert.ok(modelSnapshot.defaultValue);
+    assert.equal(modelSnapshot.current, modelSnapshot.defaultValue);
+    assert.ok(modelSnapshot.effort);
+  } else {
+    assert.match(modelSnapshot.help, /catálogo|App Server/iu);
+  }
+  await window.locator('#goal-model').scrollIntoViewIfNeeded();
+  await window.screenshot({ path: path.join(qaDirectory, 'desktop-model-selector.png') });
+  await window.locator('#goal-model').fill('modelo-fuera-del-catalogo');
+  await window.locator('#models-refresh-button').click();
+  await window.waitForFunction(() => !document.querySelector('#models-refresh-button')?.hasAttribute('disabled'));
+  assert.equal(await window.locator('#goal-model').inputValue(), 'modelo-fuera-del-catalogo');
+  await window.locator('#goal-model').fill(modelSnapshot.defaultValue);
   await window.locator('#dialog-close-button').click();
   assert.equal(await window.locator('#resume-verify').inputValue(), '');
   assert.equal(await window.locator('#resume-network').isChecked(), false);
   assert.equal(await window.locator('#resume-full-access').isChecked(), false);
 
+  let observedSessionOverflow = false;
   for (const viewport of [
     { width: 1024, height: 768 },
     { width: 760, height: 900 },
@@ -109,12 +139,20 @@ try {
       true,
       JSON.stringify({ viewport, compactFit }),
     );
+    const scrollState = await sessionsScrollSnapshot(window);
+    observedSessionOverflow ||= scrollState.canScroll;
+    assert.equal(scrollState.headingStayedFixed, true, JSON.stringify({ viewport, scrollState }));
+    assert.equal(scrollState.refreshInViewport, true, JSON.stringify({ viewport, scrollState }));
+    if (scrollState.canScroll) assert.ok(scrollState.scrollTop > 0, JSON.stringify({ viewport, scrollState }));
     await window.screenshot({
       path: path.join(qaDirectory, `desktop-sessions-${viewport.width}.png`),
     });
   }
+  if (await window.locator('.session-item').count() > 3) assert.equal(observedSessionOverflow, true);
 
   await window.locator('#new-goal-button').click();
+  await window.locator('#advanced-settings summary').click();
+  await window.locator('#goal-model').scrollIntoViewIfNeeded();
   const compactDialogFit = await window.locator('#goal-dialog').evaluate((dialog) => {
     const rect = dialog.getBoundingClientRect();
     return rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight;
@@ -170,6 +208,28 @@ async function compactSessionsSnapshot(window) {
             && rect.right <= innerWidth + 1 && rect.bottom <= innerHeight + 1),
         };
       }),
+    };
+  });
+}
+
+async function sessionsScrollSnapshot(window) {
+  return window.evaluate(() => {
+    const panel = document.querySelector('#sessions-panel');
+    const heading = document.querySelector('.sessions-heading');
+    const list = document.querySelector('#thread-list');
+    const refresh = document.querySelector('#threads-refresh-button');
+    if (!panel || !heading || !list || !refresh) throw new Error('Panel de sesiones incompleto.');
+    const headingTop = heading.getBoundingClientRect().top;
+    list.scrollTop = list.scrollHeight;
+    const refreshRect = refresh.getBoundingClientRect();
+    return {
+      canScroll: list.scrollHeight > list.clientHeight,
+      scrollTop: list.scrollTop,
+      headingStayedFixed: Math.abs(heading.getBoundingClientRect().top - headingTop) < 1,
+      refreshInViewport: refreshRect.left >= 0 && refreshRect.top >= 0
+        && refreshRect.right <= innerWidth + 1 && refreshRect.bottom <= innerHeight + 1,
+      panelOverflow: getComputedStyle(panel).overflow,
+      listOverflowY: getComputedStyle(list).overflowY,
     };
   });
 }

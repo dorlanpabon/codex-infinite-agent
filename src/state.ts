@@ -76,7 +76,7 @@ export interface RunState {
   dangerFullAccess: boolean;
   verifyCommands: string[];
   model: string | null;
-  effort: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'ultra' | null;
+  effort: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' | null;
   gitBaseline: GitBaseline;
   gitFinal: GitBaseline | null;
   lastTurn: NativeTurnRecord | null;
@@ -161,7 +161,7 @@ function validateState(value: unknown): asserts value is RunState {
   const statuses = new Set<RunStatus>(['initializing', 'running', 'verifying', 'paused', 'blocked', 'budgetLimited', 'completed', 'failed']);
   const goalStatuses = new Set<GoalStatus>(['active', 'paused', 'blocked', 'usageLimited', 'budgetLimited', 'complete']);
   const turnStatuses = new Set<TurnStatus>(['completed', 'interrupted', 'failed', 'inProgress']);
-  const efforts = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'ultra']);
+  const efforts = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
   const validLastTurn = item.lastTurn === null || (isRecord(item.lastTurn)
     && nullableString(item.lastTurn.turnId, 128) && typeof item.lastTurn.turnId === 'string' && item.lastTurn.turnId.length > 0
     && typeof item.lastTurn.status === 'string' && turnStatuses.has(item.lastTurn.status as TurnStatus)

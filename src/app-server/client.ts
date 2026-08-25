@@ -19,6 +19,23 @@ export interface AccountInfo {
   requiresOpenaiAuth: boolean;
 }
 
+export interface ModelReasoningEffort {
+  reasoningEffort: string;
+  description: string | null;
+}
+
+export interface ModelInfo {
+  id: string;
+  model: string;
+  displayName: string;
+  hidden: boolean;
+  defaultReasoningEffort: string | null;
+  supportedReasoningEfforts: ModelReasoningEffort[];
+  inputModalities: string[];
+  supportsPersonality: boolean;
+  isDefault: boolean;
+}
+
 export interface ThreadInfo {
   id: string;
   preview: string;
@@ -48,7 +65,7 @@ export interface ThreadSettings {
   network: boolean;
   dangerFullAccess: boolean;
   model?: string;
-  effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'ultra';
+  effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 }
 
 export interface TurnResult {
@@ -182,6 +199,62 @@ function requiredString(value: unknown, label: string): string {
     throw new AppError('INVALID_APP_SERVER_RESPONSE', `App Server devolvio ${label} invalido.`);
   }
   return value;
+}
+
+function boundedWireString(value: unknown, label: string, maximum: number): string {
+  const parsed = requiredString(value, label);
+  if (parsed.length > maximum || /[\x00-\x1f\x7f]/u.test(parsed)) {
+    throw new AppError('INVALID_APP_SERVER_RESPONSE', `App Server devolvio ${label} invalido.`);
+  }
+  return parsed;
+}
+
+function recordModel(value: unknown): ModelInfo {
+  if (!isRecord(value)) throw new AppError('INVALID_APP_SERVER_RESPONSE', 'App Server devolvio un modelo invalido.');
+  const id = boundedWireString(value.id, 'model.id', 256);
+  const model = typeof value.model === 'string' ? boundedWireString(value.model, 'model.model', 256) : id;
+  const displayName = typeof value.displayName === 'string'
+    ? boundedWireString(value.displayName, 'model.displayName', 256)
+    : model;
+  if (value.defaultReasoningEffort !== null && value.defaultReasoningEffort !== undefined
+    && typeof value.defaultReasoningEffort !== 'string') {
+    throw new AppError('INVALID_APP_SERVER_RESPONSE', 'App Server devolvio model.defaultReasoningEffort invalido.');
+  }
+  const defaultReasoningEffort = typeof value.defaultReasoningEffort === 'string'
+    ? boundedWireString(value.defaultReasoningEffort, 'model.defaultReasoningEffort', 64)
+    : null;
+  if (value.supportedReasoningEfforts !== undefined && !Array.isArray(value.supportedReasoningEfforts)) {
+    throw new AppError('INVALID_APP_SERVER_RESPONSE', 'App Server devolvio model.supportedReasoningEfforts invalido.');
+  }
+  const supportedReasoningEfforts = (value.supportedReasoningEfforts ?? []).map((entry: unknown): ModelReasoningEffort => {
+    if (!isRecord(entry)) throw new AppError('INVALID_APP_SERVER_RESPONSE', 'App Server devolvio un esfuerzo de modelo invalido.');
+    return {
+      reasoningEffort: boundedWireString(entry.reasoningEffort, 'model.reasoningEffort', 64),
+      description: typeof entry.description === 'string'
+        ? boundedWireString(entry.description, 'model.reasoningEffort.description', 1000)
+        : null,
+    };
+  });
+  if (supportedReasoningEfforts.length > 32) {
+    throw new AppError('INVALID_APP_SERVER_RESPONSE', 'App Server devolvio demasiados esfuerzos para un modelo.');
+  }
+  if (value.inputModalities !== undefined && (!Array.isArray(value.inputModalities)
+    || value.inputModalities.length > 16 || !value.inputModalities.every((entry) => typeof entry === 'string'))) {
+    throw new AppError('INVALID_APP_SERVER_RESPONSE', 'App Server devolvio model.inputModalities invalido.');
+  }
+  const inputModalities = (value.inputModalities ?? ['text', 'image'])
+    .map((entry: unknown) => boundedWireString(entry, 'model.inputModalities', 64));
+  return {
+    id,
+    model,
+    displayName,
+    hidden: value.hidden === true,
+    defaultReasoningEffort,
+    supportedReasoningEfforts,
+    inputModalities,
+    supportsPersonality: value.supportsPersonality === true,
+    isDefault: value.isDefault === true,
+  };
 }
 
 function recordThread(value: unknown): ThreadInfo {
@@ -470,6 +543,41 @@ export class CodexDesktopClient {
       cursor = typeof response.nextCursor === 'string' ? response.nextCursor : null;
     } while (cursor && result.length < limit);
     return result.slice(0, limit);
+  }
+
+  async listModels(maximum = 200): Promise<ModelInfo[]> {
+    if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > 500) {
+      throw new AppError('INVALID_MODEL_LIMIT', 'El limite de modelos debe estar entre 1 y 500.');
+    }
+    const result: ModelInfo[] = [];
+    const seenModels = new Set<string>();
+    const seenCursors = new Set<string>();
+    let cursor: string | null = null;
+    do {
+      const response: unknown = await this.rpc.request('model/list', {
+        cursor,
+        limit: Math.min(100, maximum - result.length),
+        includeHidden: false,
+      });
+      if (!isRecord(response) || !Array.isArray(response.data)) {
+        throw new AppError('INVALID_APP_SERVER_RESPONSE', 'Respuesta model/list invalida.');
+      }
+      for (const item of response.data) {
+        const model = recordModel(item);
+        if (model.hidden || seenModels.has(model.model)) continue;
+        seenModels.add(model.model);
+        result.push(model);
+        if (result.length === maximum) break;
+      }
+      cursor = typeof response.nextCursor === 'string' && response.nextCursor.length > 0
+        ? response.nextCursor
+        : null;
+      if (cursor) {
+        if (seenCursors.has(cursor)) throw new AppError('INVALID_APP_SERVER_RESPONSE', 'model/list repitio un cursor.');
+        seenCursors.add(cursor);
+      }
+    } while (cursor && result.length < maximum);
+    return result;
   }
 
   async setThreadName(threadId: string, name: string): Promise<void> {

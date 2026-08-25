@@ -9,6 +9,7 @@ import {
   type Effort,
   type LogLevel,
   type LocalAttachment,
+  type ModelInfo,
   type StartRunInput,
 } from '../contracts.js';
 
@@ -55,6 +56,7 @@ const ui = {
   doctorDot: element<HTMLSpanElement>('doctor-dot'),
   doctorLabel: element<HTMLSpanElement>('doctor-label'),
   effortInput: element<HTMLSelectElement>('goal-effort'),
+  effortHelp: element<HTMLElement>('effort-help'),
   emptyNewGoalButton: element<HTMLButtonElement>('empty-new-goal-button'),
   emptyState: element<HTMLElement>('empty-state'),
   errorBanner: element<HTMLElement>('error-banner'),
@@ -84,6 +86,9 @@ const ui = {
   metricTurns: element<HTMLElement>('metric-turns'),
   metricVerifications: element<HTMLElement>('metric-verifications'),
   modelInput: element<HTMLInputElement>('goal-model'),
+  modelHelp: element<HTMLElement>('model-help'),
+  modelOptions: element<HTMLDataListElement>('goal-model-options'),
+  modelsRefreshButton: element<HTMLButtonElement>('models-refresh-button'),
   nameInput: element<HTMLInputElement>('goal-name'),
   nativeGoalStatus: element<HTMLElement>('native-goal-status'),
   networkInput: element<HTMLInputElement>('goal-network'),
@@ -175,6 +180,7 @@ const effortLabels: Record<Effort, string> = {
   medium: 'Medio',
   high: 'Alto',
   xhigh: 'Muy alto',
+  max: 'Máximo',
   ultra: 'Ultra',
 };
 
@@ -193,6 +199,10 @@ const relativeFormatter = new Intl.RelativeTimeFormat('es', { numeric: 'auto' })
 let runs: RunState[] = [];
 let selectedRunId: string | null = null;
 let doctorResult: DoctorResult | null = null;
+let models: ModelInfo[] = [];
+let modelsRefreshInFlight: Promise<void> | null = null;
+let preferredNewModel: string | null = null;
+let preferredNewEffort: Effort | null = null;
 let sessions: DesktopSessionInfo[] = [];
 let sessionLogs: SessionLog[] = [];
 let pollInFlight = false;
@@ -538,7 +548,7 @@ async function runDoctor(showToast = true): Promise<void> {
       ? `App Server ${result.binary.version} disponible.`
       : 'El diagnóstico encontró una configuración incompleta.');
     if (showToast) toast(result.ok ? 'Diagnóstico completado.' : 'La configuración requiere revisión.', !result.ok);
-    if (result.ok) await refreshThreads(true);
+    if (result.ok) await Promise.all([refreshThreads(true), refreshModels(true)]);
   } catch (error) {
     const message = errorText(error);
     setDot(ui.doctorDot, 'error');
@@ -772,13 +782,150 @@ function refreshThreads(quiet = false): Promise<void> {
   return sessionsRefreshInFlight;
 }
 
-function populateEfforts(): void {
-  for (const effort of EFFORTS) {
+function effortValue(value: string | null | undefined): Effort | null {
+  return value && EFFORTS.includes(value as Effort) ? value as Effort : null;
+}
+
+function selectedModel(value = ui.modelInput.value.trim()): ModelInfo | null {
+  return models.find((candidate) => candidate.model === value || candidate.id === value) ?? null;
+}
+
+function nativeDefaultModel(): ModelInfo | null {
+  const defaults = models.filter((model) => model.isDefault);
+  return defaults.length === 1 ? defaults[0]! : null;
+}
+
+function nativeDefaultSummary(): string | null {
+  const model = nativeDefaultModel();
+  return model ? `${model.displayName} (${model.model})` : null;
+}
+
+function renderModelOptions(): void {
+  const fragment = document.createDocumentFragment();
+  for (const model of models) {
+    const option = document.createElement('option');
+    option.value = model.model;
+    option.label = `${model.displayName}${model.isDefault ? ' · Predeterminado' : ''}`;
+    fragment.append(option);
+  }
+  ui.modelOptions.replaceChildren(fragment);
+}
+
+function renderModelHelp(error: string | null = null): void {
+  if (error) {
+    ui.modelHelp.textContent = `Catálogo no disponible: ${error} Puedes dejar el campo vacío o escribir un ID; esto no bloquea el objetivo.`;
+    return;
+  }
+  const defaultSummary = nativeDefaultSummary();
+  const current = ui.modelInput.value.trim();
+  const match = selectedModel(current);
+  if (attachSession && !current) {
+    ui.modelHelp.textContent = `${defaultSummary ? `Predeterminado nativo: ${defaultSummary}. ` : ''}Sin selección se conserva el modelo de esta sesión.`;
+  } else if (match) {
+    ui.modelHelp.textContent = `${match.displayName}${match.isDefault ? ' · predeterminado nativo' : ''} · ${match.model}`;
+  } else if (current) {
+    ui.modelHelp.textContent = `${defaultSummary ? `Predeterminado nativo: ${defaultSummary}. ` : ''}El ID escrito no figura en el catálogo y se conservará sin modificar.`;
+  } else if (defaultSummary) {
+    ui.modelHelp.textContent = `Predeterminado nativo: ${defaultSummary}.`;
+  } else if (models.length > 0) {
+    ui.modelHelp.textContent = 'Codex no marcó un único modelo predeterminado; App Server resolverá el campo vacío.';
+  } else {
+    ui.modelHelp.textContent = 'Sin catálogo: App Server resolverá el modelo predeterminado si dejas el campo vacío.';
+  }
+}
+
+function configureEfforts(preferred: Effort | null, selectNativeDefault: boolean): void {
+  const model = selectedModel();
+  const nativeEfforts = model?.supportedReasoningEfforts
+    .map(({ reasoningEffort }) => effortValue(reasoningEffort))
+    .filter((effort): effort is Effort => effort !== null) ?? [];
+  const choices = [...new Set(nativeEfforts.length > 0 ? nativeEfforts : EFFORTS)];
+  const defaultEffort = effortValue(model?.defaultReasoningEffort);
+  if (defaultEffort && !choices.includes(defaultEffort)) choices.unshift(defaultEffort);
+
+  const fragment = document.createDocumentFragment();
+  const automatic = document.createElement('option');
+  automatic.value = '';
+  automatic.textContent = attachSession
+    ? 'Conservar esfuerzo de la sesión'
+    : defaultEffort ? `Automático (${effortLabels[defaultEffort]})` : 'Predeterminado de Codex';
+  fragment.append(automatic);
+  for (const effort of choices) {
     const option = document.createElement('option');
     option.value = effort;
-    option.textContent = effortLabels[effort];
-    ui.effortInput.append(option);
+    option.textContent = `${effortLabels[effort]}${effort === defaultEffort ? ' · Predeterminado' : ''}`;
+    fragment.append(option);
   }
+  ui.effortInput.replaceChildren(fragment);
+
+  const nextEffort = preferred && choices.includes(preferred)
+    ? preferred
+    : selectNativeDefault && defaultEffort ? defaultEffort : null;
+  ui.effortInput.value = nextEffort ?? '';
+  if (model && nativeEfforts.length > 0) {
+    ui.effortHelp.textContent = `${model.displayName}: ${choices.map((effort) => effortLabels[effort]).join(', ')}.`;
+  } else if (ui.modelInput.value.trim()) {
+    ui.effortHelp.textContent = 'Modelo fuera del catálogo: Codex validará el esfuerzo al iniciar.';
+  } else {
+    ui.effortHelp.textContent = attachSession
+      ? 'Sin selección se conserva el esfuerzo de la sesión.'
+      : 'Codex resolverá el esfuerzo predeterminado.';
+  }
+}
+
+function selectModelDefaults(): void {
+  const model = selectedModel();
+  configureEfforts(null, model !== null);
+  renderModelHelp();
+  if (!attachSession) {
+    preferredNewModel = ui.modelInput.value.trim() || null;
+    preferredNewEffort = effortValue(ui.effortInput.value);
+  }
+}
+
+function refreshModels(quiet = false): Promise<void> {
+  if (modelsRefreshInFlight) return modelsRefreshInFlight;
+  ui.modelsRefreshButton.disabled = true;
+  ui.modelsRefreshButton.textContent = 'Cargando…';
+  ui.modelHelp.textContent = 'Consultando model/list en Codex App Server…';
+  const reconcile = async (): Promise<void> => {
+    try {
+      const nextModels = await api.listModels({
+        workspace: ui.workspaceInput.value.trim() || null,
+        binary: ui.binaryInput.value.trim() || chosenBinary,
+      });
+      models = nextModels;
+      renderModelOptions();
+      const defaultModel = nativeDefaultModel();
+      if (preferredNewModel === null && defaultModel) preferredNewModel = defaultModel.model;
+      if (!attachSession) {
+        const current = ui.goalDialog.open ? ui.modelInput.value.trim() : '';
+        ui.modelInput.value = current || preferredNewModel || defaultModel?.model || '';
+        configureEfforts(preferredNewEffort, preferredNewEffort === null);
+        preferredNewEffort = effortValue(ui.effortInput.value);
+      } else {
+        configureEfforts(effortValue(ui.effortInput.value), false);
+      }
+      renderModelHelp();
+      const summary = nativeDefaultSummary();
+      appendLog('info', `${models.length} modelos disponibles${summary ? `; predeterminado ${summary}` : ''}.`);
+      if (!quiet) toast(`${models.length} modelos actualizados.`);
+    } catch (error) {
+      const message = errorText(error);
+      models = [];
+      renderModelOptions();
+      configureEfforts(effortValue(ui.effortInput.value), false);
+      renderModelHelp(message);
+      appendLog('warn', `Modelos Desktop: ${message}`);
+      if (!quiet) toast(message, true);
+    } finally {
+      ui.modelsRefreshButton.disabled = false;
+      ui.modelsRefreshButton.textContent = 'Actualizar';
+      modelsRefreshInFlight = null;
+    }
+  };
+  modelsRefreshInFlight = Promise.resolve().then(reconcile);
+  return modelsRefreshInFlight;
 }
 
 function setFormError(message: string | null): void {
@@ -876,6 +1023,9 @@ function openGoalDialog(session: DesktopSessionInfo | null = null): void {
   ui.form.reset();
   ui.workspaceInput.value = workspace;
   ui.binaryInput.value = binary;
+  ui.modelInput.value = session ? '' : preferredNewModel ?? nativeDefaultModel()?.model ?? '';
+  configureEfforts(session ? null : preferredNewEffort, session === null && preferredNewEffort === null);
+  renderModelHelp();
   ui.threadRow.hidden = session === null;
   ui.threadInput.value = session?.thread.id ?? '';
   ui.workspaceInput.readOnly = session !== null;
@@ -899,6 +1049,7 @@ function openGoalDialog(session: DesktopSessionInfo | null = null): void {
   updateDangerConfirmation();
   setFormError(null);
   if (!ui.goalDialog.open) ui.goalDialog.showModal();
+  if (models.length === 0) void refreshModels(true);
   window.setTimeout(() => ui.objectiveInput.focus(), 0);
 }
 
@@ -1242,6 +1393,11 @@ function wireEvents(): () => void {
   ui.dangerFullAccess.addEventListener('change', updateDangerConfirmation);
   ui.workspacePickerButton.addEventListener('click', () => { void chooseWorkspace(); });
   ui.binaryPickerButton.addEventListener('click', () => { void chooseBinary(); });
+  ui.modelsRefreshButton.addEventListener('click', () => { void refreshModels(); });
+  ui.modelInput.addEventListener('input', selectModelDefaults);
+  ui.effortInput.addEventListener('change', () => {
+    if (!attachSession) preferredNewEffort = effortValue(ui.effortInput.value);
+  });
   ui.doctorButton.addEventListener('click', () => { void runDoctor(); });
   ui.dialogDoctorButton.addEventListener('click', () => { void runDoctor(); });
   ui.threadsRefreshButton.addEventListener('click', () => { void refreshThreads(); });
@@ -1268,7 +1424,7 @@ function wireEvents(): () => void {
 }
 
 async function initialize(): Promise<void> {
-  populateEfforts();
+  configureEfforts(null, false);
   setActiveTab('inspector');
   updateLogMeta();
   render();

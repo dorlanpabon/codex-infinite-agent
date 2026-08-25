@@ -15,7 +15,7 @@ import {
 import squirrelStartup from 'electron-squirrel-startup';
 import { errorMessage } from '../errors.js';
 import { sanitizeLog, type Logger } from '../log.js';
-import { doctorDesktop, listDesktopSessions, listDesktopThreads } from '../operations.js';
+import { doctorDesktop, listDesktopModels, listDesktopSessions, listDesktopThreads } from '../operations.js';
 import { listRuns, loadRun } from '../state.js';
 import {
   DESKTOP_ORIGIN,
@@ -47,6 +47,7 @@ const CHANNELS = {
   resumeRun: 'runs:resume',
   pauseRun: 'runs:pause',
   openCodexThread: 'threads:open-in-codex',
+  listModels: 'models:list',
   listThreads: 'threads:list',
   listSessions: 'sessions:list',
   event: 'runs:event',
@@ -186,6 +187,11 @@ function registerHandlers(): void {
     } catch (error) {
       throw new Error(`No se pudo abrir Codex Desktop: ${sanitizeLog(errorMessage(error))}`);
     }
+  });
+  ipcMain.handle(CHANNELS.listModels, async (event, raw: unknown) => {
+    assertTrustedSender(event);
+    const input = parseDoctorInput(raw);
+    return listDesktopModels(input.workspace, input.binary, ipcLogger('models'));
   });
   ipcMain.handle(CHANNELS.listThreads, async (event, raw: unknown) => {
     assertTrustedSender(event);

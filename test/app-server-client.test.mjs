@@ -38,6 +38,24 @@ function thread(id, cwd = 'D:\\workspace') {
   };
 }
 
+function model(id, overrides = {}) {
+  return {
+    id,
+    model: id,
+    displayName: id.toUpperCase(),
+    hidden: false,
+    defaultReasoningEffort: 'low',
+    supportedReasoningEfforts: [
+      { reasoningEffort: 'low', description: 'Fast' },
+      { reasoningEffort: 'max', description: 'Deep' },
+    ],
+    inputModalities: ['text', 'image'],
+    supportsPersonality: true,
+    isDefault: false,
+    ...overrides,
+  };
+}
+
 class FakeTransport extends EventEmitter {
   calls = [];
   responses = [];
@@ -96,6 +114,39 @@ test('startThread relies on native Goal tools and applies the safe policy', asyn
   assert.equal(call.params.sandbox, 'workspace-write');
   assert.equal(call.params.ephemeral, false);
   assert.equal(Object.hasOwn(call.params, 'dynamicTools'), false);
+});
+
+test('listModels pages the native catalog and preserves its real default and efforts', async (t) => {
+  const rpc = new FakeTransport();
+  const client = new CodexDesktopClient(rpc, logger);
+  t.after(() => client.close());
+  rpc.when('model/list', ({ params }) => params.cursor === null
+    ? {
+        data: [
+          model('gpt-default', { isDefault: true }),
+          model('gpt-hidden', { hidden: true }),
+        ],
+        nextCursor: 'page-2',
+      }
+    : { data: [model('gpt-fast', { defaultReasoningEffort: 'max' })], nextCursor: null });
+
+  const result = await client.listModels();
+
+  assert.deepEqual(result.map(({ model: id }) => id), ['gpt-default', 'gpt-fast']);
+  assert.equal(result[0].isDefault, true);
+  assert.equal(result[0].supportedReasoningEfforts[1].reasoningEffort, 'max');
+  assert.equal(result[1].defaultReasoningEffort, 'max');
+  assert.equal(rpc.calls.filter(({ method }) => method === 'model/list').length, 2);
+  assert.equal(rpc.calls[0].params.includeHidden, false);
+});
+
+test('listModels rejects malformed native catalog pages', async (t) => {
+  const rpc = new FakeTransport();
+  const client = new CodexDesktopClient(rpc, logger);
+  t.after(() => client.close());
+  rpc.when('model/list', () => ({ data: [model('gpt-bad', { supportedReasoningEfforts: [{ reasoningEffort: 7 }] })] }));
+
+  await assert.rejects(() => client.listModels(), /esfuerzo|reasoningEffort|invalido/i);
 });
 
 test('configureThread applies network, sandbox, model, and effort to native Goal turns', async (t) => {

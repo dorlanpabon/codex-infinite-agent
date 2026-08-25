@@ -1,9 +1,11 @@
 import type { BinaryInfo } from '../app-server/binary.js';
-import type { GoalInfo, ThreadInfo } from '../app-server/client.js';
+import type { GoalInfo, ModelInfo, ThreadInfo } from '../app-server/client.js';
 import type { RunState } from '../state.js';
 
+export type { ModelInfo };
+
 export const DESKTOP_ORIGIN = 'codex-infinite://app';
-export const EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'ultra'] as const;
+export const EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
 export const MAX_ATTACHMENTS = 100;
 
 export type Effort = typeof EFFORTS[number];
@@ -109,6 +111,7 @@ export interface DesktopApi {
   resumeRun(input: ResumeRunInput): Promise<OperationReceipt>;
   pauseRun(runId: string): Promise<OperationReceipt>;
   openCodexThread(threadId: string): Promise<void>;
+  listModels(input: DoctorInput): Promise<ModelInfo[]>;
   listThreads(input: ThreadsInput): Promise<ThreadInfo[]>;
   listSessions(input: ThreadsInput): Promise<DesktopSessionInfo[]>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;

@@ -34,6 +34,8 @@ npm start
 
 La aplicación comprueba Desktop y la sesión, permite elegir el workspace, crear o reanudar Goals, adjuntar archivos, pausarlos, revisar su progreso durable y consultar los threads compartidos. El editor no recorta el objetivo. Al reanudar, red, acceso total y comandos de verificación vuelven a valores seguros y deben autorizarse otra vez en el diálogo.
 
+El diálogo consulta `model/list` directamente al App Server autenticado, muestra solo los modelos disponibles para la cuenta y selecciona explícitamente el único `isDefault` nativo junto con su esfuerzo predeterminado. Al cambiar de modelo, el selector de esfuerzo se limita a sus valores admitidos. Si un App Server antiguo no ofrece el catálogo, el aviso no bloquea el objetivo: el campo vacío conserva la resolución nativa y cualquier ID escrito manualmente permanece intacto.
+
 ### Sesiones activas
 
 La pestaña **Sesiones** muestra los threads persistidos de Codex Desktop junto con su estado de runtime, Goal y supervisor local. **Abrir en Codex** lleva directamente al thread mediante el enlace local de Codex Desktop. El interruptor **Continuar hasta terminar** activa directamente un Goal pausado. Si el thread todavía no tiene Goal, abre **Coloca el objetivo para activar** para escribir el objetivo y, si hace falta, adjuntar archivos. Si hay un turno manual activo, el companion solo lo observa y espera su estado `idle`; no activa el Goal ni envía mensajes por temporizador. Solo puede pausar una ejecución que esta instancia haya adoptado.

@@ -1,6 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
-import { CodexDesktopClient, type GoalInfo, type ThreadInfo } from './app-server/client.js';
+import { CodexDesktopClient, type GoalInfo, type ModelInfo, type ThreadInfo } from './app-server/client.js';
 import { discoverCodexBinary, type BinaryInfo } from './app-server/binary.js';
 import { JsonRpcProcess } from './app-server/rpc.js';
 import { validateAttachmentPaths } from './attachments.js';
@@ -19,7 +19,7 @@ import {
 import { supervise } from './supervisor.js';
 import type { DesktopSessionInfo } from './desktop/contracts.js';
 
-const EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'ultra']);
+const EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 
 export { validateAttachmentPaths } from './attachments.js';
 
@@ -417,6 +417,20 @@ export async function listDesktopThreads(
   const { client } = await openClient(cwd, explicitBinary, logger);
   try {
     return await client.listThreads(workspace ? cwd : undefined, positiveNumber(limit, 50, 'limit', true, 100));
+  } finally {
+    await client.close();
+  }
+}
+
+export async function listDesktopModels(
+  workspace: string | null,
+  explicitBinary: string | null,
+  logger: Logger,
+): Promise<ModelInfo[]> {
+  const cwd = path.resolve(workspace ?? os.homedir());
+  const { client } = await openClient(cwd, explicitBinary, logger);
+  try {
+    return await client.listModels();
   } finally {
     await client.close();
   }

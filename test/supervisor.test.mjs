@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -199,8 +199,9 @@ test('long objective and attachments are injected exactly once before native Goa
     return originalRun(...args);
   };
   const objective = `Objetivo completo ${'detalle '.repeat(800)}`;
-  const attachment = path.join(temp, 'brief.pdf');
-  await writeFile(attachment, 'brief', 'utf8');
+  const selectedAttachment = path.join(temp, 'brief.pdf');
+  await writeFile(selectedAttachment, 'brief', 'utf8');
+  const attachment = await realpath(selectedAttachment);
   const state = createState(process.cwd(), { objective, attachments: [attachment] });
 
   const result = await supervise(client, state, silentLogger, {

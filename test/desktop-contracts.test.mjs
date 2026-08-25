@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   parseAttachRunInput,
+  parseAttachmentPaths,
   parseDoctorInput,
   parseResumeRunInput,
   parseRunId,
@@ -10,6 +11,7 @@ import {
 
 const startInput = {
   objective: 'Termina la migracion y verifica el resultado',
+  attachments: [],
   workspace: 'C:\\workspace',
   name: null,
   maxTurns: 30,
@@ -25,8 +27,10 @@ const startInput = {
   binary: null,
 };
 
-test('desktop contracts accept bounded exact inputs', () => {
+test('desktop contracts accept exact inputs without an artificial objective limit', () => {
   assert.deepEqual(parseStartRunInput(startInput), startInput);
+  assert.equal(parseStartRunInput({ ...startInput, objective: 'x'.repeat(20_000) }).objective.length, 20_000);
+  assert.deepEqual(parseAttachmentPaths(['C:\\workspace\\brief.pdf']), ['C:\\workspace\\brief.pdf']);
   assert.deepEqual(parseDoctorInput({ workspace: null, binary: null }), { workspace: null, binary: null });
   assert.equal(parseRunId('123e4567-e89b-42d3-a456-426614174000'), '123e4567-e89b-42d3-a456-426614174000');
   assert.deepEqual(parseAttachRunInput({ ...startInput, threadId: 'thread-existing' }), {
@@ -54,4 +58,7 @@ test('desktop contracts reject malformed identifiers and oversized values', () =
   assert.throws(() => parseStartRunInput({ ...startInput, verifyCommands: Array.from({ length: 21 }, () => 'true') }), /invalidos/i);
   assert.throws(() => parseAttachRunInput({ ...startInput, threadId: '../thread\n' }), /invalidos/i);
   assert.throws(() => parseAttachRunInput({ ...startInput, threadId: 'thread-ok', extra: true }), /invalidos/i);
+  assert.throws(() => parseStartRunInput({ ...startInput, attachments: ['relative.txt'] }), /invalidos/i);
+  assert.throws(() => parseAttachmentPaths(['C:\\file.txt', 'C:\\file.txt']), /invalidas/i);
+  assert.throws(() => parseAttachmentPaths(['C:\\bad\nfile.txt']), /invalidas/i);
 });

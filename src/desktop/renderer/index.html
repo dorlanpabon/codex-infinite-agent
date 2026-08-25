@@ -218,9 +218,21 @@
         <div class="dialog-body">
           <div class="field">
             <label for="goal-objective">Objetivo <span aria-hidden="true">*</span></label>
-            <textarea id="goal-objective" name="objective" rows="5" maxlength="4000" required placeholder="Describe un resultado verificable, los límites y cuándo debe considerarse terminado."></textarea>
-            <div class="field-meta"><span>Será el Goal durable de Codex Desktop.</span><span id="objective-count">0 / 4000</span></div>
+            <textarea id="goal-objective" name="objective" rows="5" required placeholder="Describe un resultado verificable, los límites y cuándo debe considerarse terminado."></textarea>
+            <div class="field-meta"><span>Sin límite del editor. Si supera el límite nativo, se inyecta completo una sola vez.</span><span id="objective-count">0 caracteres</span></div>
           </div>
+
+          <section class="attachment-field" id="attachment-dropzone" aria-labelledby="attachment-title" aria-describedby="attachment-help">
+            <div class="attachment-heading">
+              <div>
+                <strong id="attachment-title">Archivos adjuntos</strong>
+                <p id="attachment-help">Selecciona o arrastra hasta 100 archivos. Codex recibirá sus rutas absolutas sin iniciar un turno adicional.</p>
+              </div>
+              <button class="secondary-button attachment-picker" id="attachment-picker-button" type="button">Añadir archivos</button>
+            </div>
+            <ul class="attachment-list" id="attachment-list" aria-label="Archivos adjuntos seleccionados"></ul>
+            <p class="attachment-empty" id="attachment-empty">Suelta archivos aquí o usa “Añadir archivos”.</p>
+          </section>
 
           <div class="field">
             <label for="goal-name">Nombre visible</label>

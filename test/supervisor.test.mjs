@@ -94,7 +94,8 @@ class FakeClient {
     this.runGoalCalls.push(options);
     const index = this.runGoalCalls.length;
     const turnId = `turn-${index}`;
-    const active = { ...goal('active', index * 10), tokenBudget: options.tokenBudget ?? null };
+    const objective = options.objective ?? this.currentGoal?.objective ?? 'Finish the test goal';
+    const active = { ...goal('active', index * 10), objective, tokenBudget: options.tokenBudget ?? null };
     options.onActivationAttempt?.();
     this.currentGoal = active;
     await options.onActivated?.(active);
@@ -102,7 +103,7 @@ class FakeClient {
     await options.onTurnStarted?.(turnId);
     const terminalStatus = this.terminals.shift();
     assert.notEqual(terminalStatus, undefined, 'fake terminal sequence exhausted');
-    const terminal = { ...goal(terminalStatus, index * 10), tokenBudget: options.tokenBudget ?? null };
+    const terminal = { ...goal(terminalStatus, index * 10), objective, tokenBudget: options.tokenBudget ?? null };
     this.currentGoal = terminal;
     await options.onGoalUpdated?.(terminal);
     const turnStatus = this.turnStatuses.shift() ?? 'completed';
@@ -181,6 +182,110 @@ test('supervisor completes only after native Goal and host verification', async 
   assert.equal(result.gitFinal.root, process.cwd());
   assert.equal(client.runGoalCalls.length, 1);
   assert.equal(client.runGoalCalls[0].objective, 'Finish the test goal');
+});
+
+test('long objective and attachments are injected exactly once before native Goal activation', async (t) => {
+  const temp = await withStateHome(t);
+  const order = [];
+  const client = new FakeClient(['complete']);
+  const originalInject = client.injectText.bind(client);
+  const originalRun = client.runNativeGoal.bind(client);
+  client.injectText = async (...args) => {
+    order.push('inject');
+    return originalInject(...args);
+  };
+  client.runNativeGoal = async (...args) => {
+    order.push('activate');
+    return originalRun(...args);
+  };
+  const objective = `Objetivo completo ${'detalle '.repeat(800)}`;
+  const attachment = path.join(temp, 'brief.pdf');
+  await writeFile(attachment, 'brief', 'utf8');
+  const state = createState(process.cwd(), { objective, attachments: [attachment] });
+
+  const result = await supervise(client, state, silentLogger, {
+    resume: false,
+    signal: new AbortController().signal,
+  });
+
+  assert.equal(result.status, 'completed');
+  assert.equal(result.objective, objective);
+  assert.equal(result.contextInjectionStatus, 'injected');
+  assert.deepEqual(order.slice(0, 2), ['inject', 'activate']);
+  assert.equal(client.injected.length, 1);
+  assert.match(client.injected[0], /OBJETIVO COMPLETO/u);
+  assert.match(client.injected[0], /brief\.pdf/u);
+  assert.ok(client.runGoalCalls[0].objective.length <= 4000);
+  assert.notEqual(client.runGoalCalls[0].objective, objective);
+});
+
+test('attachments are revalidated immediately before context injection', async (t) => {
+  const temp = await withStateHome(t);
+  const attachment = path.join(temp, 'brief.txt');
+  await writeFile(attachment, 'brief', 'utf8');
+  const client = new FakeClient(['complete']);
+  const state = createState(process.cwd(), { attachments: [attachment] });
+  await rm(attachment);
+
+  await assert.rejects(() => supervise(client, state, silentLogger, {
+    resume: false,
+    signal: new AbortController().signal,
+  }), /no se puede leer el archivo adjunto/iu);
+  assert.equal(client.injected.length, 0);
+  assert.equal(client.runGoalCalls.length, 0);
+});
+
+test('pending context injection fails closed without duplicating history', async (t) => {
+  await withStateHome(t);
+  const client = new FakeClient([]);
+  const state = createState(process.cwd(), { objective: 'x'.repeat(5000) });
+  state.contextInjectionStatus = 'pending';
+
+  await assert.rejects(() => supervise(client, state, silentLogger, {
+    resume: false,
+    signal: new AbortController().signal,
+  }), /no se puede demostrar|no se repetira/u);
+  assert.equal(client.injected.length, 0);
+  assert.equal(client.runGoalCalls.length, 0);
+});
+
+test('adoption creates a missing Goal from the explicit activation objective', async (t) => {
+  await withStateHome(t);
+  const client = new FakeClient(['complete'], null);
+  const state = createState(process.cwd(), { objective: 'Termina la sesion existente' });
+  state.threadId = 'thread-test';
+
+  const result = await supervise(client, state, silentLogger, {
+    resume: true,
+    adopting: true,
+    adoptingGoalMissing: true,
+    signal: new AbortController().signal,
+  });
+
+  assert.equal(result.status, 'completed');
+  assert.equal(client.runGoalCalls.length, 1);
+  assert.equal(client.runGoalCalls[0].objective, 'Termina la sesion existente');
+});
+
+test('missing Goal adoption detects a competing Goal before activation', async (t) => {
+  await withStateHome(t);
+  const client = new FakeClient([], null);
+  let reads = 0;
+  client.getGoal = async () => {
+    reads += 1;
+    return reads >= 5 ? { ...goal('paused'), objective: 'Objetivo competidor' } : null;
+  };
+  const state = createState(process.cwd(), { objective: 'Objetivo solicitado' });
+  state.threadId = 'thread-test';
+
+  await assert.rejects(() => supervise(client, state, silentLogger, {
+    resume: true,
+    adopting: true,
+    adoptingGoalMissing: true,
+    signal: new AbortController().signal,
+  }), /Goal cambio/u);
+  assert.equal(client.runGoalCalls.length, 0);
+  assert.equal(client.restoreCalls, 1);
 });
 
 test('adoption waits for a manual turn started before supervise and never interrupts it', async (t) => {

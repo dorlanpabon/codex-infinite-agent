@@ -4,12 +4,14 @@ import type { RunState } from '../state.js';
 
 export const DESKTOP_ORIGIN = 'codex-infinite://app';
 export const EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'ultra'] as const;
+export const MAX_ATTACHMENTS = 100;
 
 export type Effort = typeof EFFORTS[number];
 export type LogLevel = 'info' | 'warn' | 'error' | 'debug';
 
 export interface StartRunInput {
   objective: string;
+  attachments: string[];
   workspace: string;
   name: string | null;
   maxTurns: number;
@@ -79,6 +81,12 @@ export interface OperationReceipt {
   operationId: string;
 }
 
+export interface LocalAttachment {
+  path: string;
+  name: string;
+  size: number;
+}
+
 export type DesktopEvent =
   | { type: 'operation-started'; operationId: string; runId: string | null; kind: 'start' | 'attach' | 'resume' | 'pause' }
   | { type: 'run-changed'; operationId: string; run: RunState }
@@ -91,6 +99,9 @@ export interface DesktopApi {
   doctor(input: DoctorInput): Promise<DoctorResult>;
   chooseWorkspace(): Promise<string | null>;
   chooseBinary(): Promise<string | null>;
+  chooseAttachments(): Promise<LocalAttachment[]>;
+  inspectAttachments(paths: string[]): Promise<LocalAttachment[]>;
+  pathForFile(file: File): string | null;
   listRuns(): Promise<RunState[]>;
   getRun(runId: string): Promise<RunState>;
   startRun(input: StartRunInput): Promise<OperationReceipt>;
@@ -125,6 +136,13 @@ function stringList(value: unknown): value is string[] {
     && value.every((item) => typeof item === 'string' && item.length > 0 && item.length <= 4000);
 }
 
+function attachmentList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length <= MAX_ATTACHMENTS
+    && value.every((item) => typeof item === 'string' && item.length > 0 && item.length <= 32_767
+      && /^(?:[a-z]:[\\/]|\\\\|\/)/iu.test(item) && !/[\x00-\x1f\x7f]/u.test(item))
+    && new Set(value).size === value.length;
+}
+
 function runId(value: unknown): value is string {
   return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
@@ -135,11 +153,12 @@ function threadId(value: unknown): value is string {
 
 export function parseStartRunInput(value: unknown): StartRunInput {
   const keys = [
-    'binary', 'dangerConfirmation', 'dangerFullAccess', 'effort', 'maxHours', 'maxTurns', 'model', 'name',
+    'attachments', 'binary', 'dangerConfirmation', 'dangerFullAccess', 'effort', 'maxHours', 'maxTurns', 'model', 'name',
     'network', 'objective', 'tokenBudget', 'turnMinutes', 'verifyCommands', 'workspace',
   ];
   if (!isRecord(value) || !exactKeys(value, keys)
-    || typeof value.objective !== 'string' || value.objective.length > 4000 || value.objective.trim().length === 0
+    || typeof value.objective !== 'string' || value.objective.trim().length === 0
+    || !attachmentList(value.attachments)
     || typeof value.workspace !== 'string' || value.workspace.length === 0 || value.workspace.length > 32_767
     || !boundedString(value.name, 128, true)
     || !boundedNumber(value.maxTurns, 1, 1000, true)
@@ -201,5 +220,10 @@ export function parseRunId(value: unknown): string {
 
 export function parseThreadId(value: unknown): string {
   if (!threadId(value)) throw new TypeError('Thread ID invalido.');
+  return value;
+}
+
+export function parseAttachmentPaths(value: unknown): string[] {
+  if (!attachmentList(value)) throw new TypeError('Rutas de archivos adjuntos invalidas.');
   return value;
 }

@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { open, readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -19,12 +19,14 @@ import { listRuns, loadRun } from '../state.js';
 import {
   DESKTOP_ORIGIN,
   parseAttachRunInput,
+  parseAttachmentPaths,
   parseDoctorInput,
   parseResumeRunInput,
   parseRunId,
   parseStartRunInput,
   parseThreadsInput,
   type DesktopEvent,
+  type LocalAttachment,
   type LogLevel,
 } from './contracts.js';
 import { RunManager } from './run-manager.js';
@@ -34,6 +36,8 @@ const CHANNELS = {
   doctor: 'system:doctor',
   chooseWorkspace: 'workspace:choose',
   chooseBinary: 'binary:choose',
+  chooseAttachments: 'attachments:choose',
+  inspectAttachments: 'attachments:inspect',
   listRuns: 'runs:list',
   getRun: 'runs:get',
   startRun: 'runs:start',
@@ -69,6 +73,30 @@ function sendEvent(event: DesktopEvent): void {
 }
 
 const runManager = new RunManager(sendEvent);
+
+async function inspectAttachmentPaths(raw: unknown): Promise<LocalAttachment[]> {
+  const paths = parseAttachmentPaths(raw);
+  const attachments: LocalAttachment[] = [];
+  const seen = new Set<string>();
+  for (const candidate of paths) {
+    const resolved = await realpath(candidate);
+    if (resolved.length > 32_767 || /[\x00-\x1f\x7f]/u.test(resolved)) throw new TypeError('La ruta resuelta del adjunto no es valida.');
+    const key = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+    if (seen.has(key)) continue;
+    const handle = await open(resolved, 'r');
+    let size: number;
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) throw new TypeError(`El adjunto no es un archivo regular: ${path.basename(resolved)}`);
+      size = info.size;
+    } finally {
+      await handle.close();
+    }
+    seen.add(key);
+    attachments.push({ path: resolved, name: path.basename(resolved), size });
+  }
+  return attachments;
+}
 
 function assertTrustedSender(event: IpcMainInvokeEvent): void {
   const senderUrl = event.senderFrame?.url;
@@ -113,6 +141,15 @@ function registerHandlers(): void {
     assertTrustedSender(event);
     const result = await dialog.showOpenDialog(mainWindow!, { properties: ['openFile'] });
     return result.canceled ? null : result.filePaths[0] ?? null;
+  });
+  ipcMain.handle(CHANNELS.chooseAttachments, async (event) => {
+    assertTrustedSender(event);
+    const result = await dialog.showOpenDialog(mainWindow!, { properties: ['openFile', 'multiSelections'] });
+    return result.canceled ? [] : inspectAttachmentPaths(result.filePaths);
+  });
+  ipcMain.handle(CHANNELS.inspectAttachments, async (event, raw: unknown) => {
+    assertTrustedSender(event);
+    return inspectAttachmentPaths(raw);
   });
   ipcMain.handle(CHANNELS.listRuns, async (event) => {
     assertTrustedSender(event);

@@ -1,5 +1,6 @@
 import {
   EFFORTS,
+  MAX_ATTACHMENTS,
   type AttachRunInput,
   type DesktopApi,
   type DesktopEvent,
@@ -7,6 +8,7 @@ import {
   type DoctorResult,
   type Effort,
   type LogLevel,
+  type LocalAttachment,
   type StartRunInput,
 } from '../contracts.js';
 
@@ -29,6 +31,10 @@ function element<T extends HTMLElement>(id: string): T {
 
 const ui = {
   advancedSettings: element<HTMLDetailsElement>('advanced-settings'),
+  attachmentDropzone: element<HTMLElement>('attachment-dropzone'),
+  attachmentEmpty: element<HTMLElement>('attachment-empty'),
+  attachmentList: element<HTMLUListElement>('attachment-list'),
+  attachmentPickerButton: element<HTMLButtonElement>('attachment-picker-button'),
   binaryInput: element<HTMLInputElement>('goal-binary'),
   binaryPickerButton: element<HTMLButtonElement>('binary-picker-button'),
   clearLogsButton: element<HTMLButtonElement>('clear-logs-button'),
@@ -198,6 +204,8 @@ let lastPollError: string | null = null;
 let chosenBinary: string | null = null;
 let resumeRunId: string | null = null;
 let attachSession: DesktopSessionInfo | null = null;
+let attachments: LocalAttachment[] = [];
+let attachmentDragDepth = 0;
 const pendingOperations = new Map<string, string | null>();
 const settledOperations = new Set<string>();
 
@@ -542,6 +550,42 @@ function sessionState(session: DesktopSessionInfo): string {
   return session.unavailableReason ?? 'Modo continuo desactivado';
 }
 
+async function activateExistingGoal(session: DesktopSessionInfo): Promise<void> {
+  if (!session.goal) return;
+  try {
+    const receipt = await api.attachRun({
+      threadId: session.thread.id,
+      objective: session.goal.objective,
+      attachments: [],
+      workspace: session.thread.cwd,
+      name: null,
+      maxTurns: 30,
+      maxHours: 8,
+      turnMinutes: 45,
+      tokenBudget: session.goal.tokenBudget,
+      verifyCommands: [],
+      model: null,
+      effort: null,
+      network: false,
+      dangerFullAccess: false,
+      dangerConfirmation: false,
+      binary: ui.binaryInput.value.trim() || chosenBinary,
+    });
+    if (!pendingOperations.has(receipt.operationId) && !settledOperations.has(receipt.operationId)) {
+      pendingOperations.set(receipt.operationId, null);
+    }
+    pendingSwitchFocusThreadId = session.thread.id;
+    appendLog('info', `Goal existente activado. Operación ${receipt.operationId}.`);
+    toast('Modo continuo activado.');
+    announce('Goal existente activado en modo continuo.');
+    await Promise.all([refreshRuns(true), refreshThreads(true)]);
+  } catch (error) {
+    const message = errorText(error);
+    appendLog('error', `Activación: ${message}`);
+    toast(message, true);
+  }
+}
+
 async function toggleSession(session: DesktopSessionInfo): Promise<void> {
   const checked = session.operationActive || session.goal?.status === 'active';
   if (checked) {
@@ -559,6 +603,10 @@ async function toggleSession(session: DesktopSessionInfo): Promise<void> {
     selectedRunId = session.localRun.runId;
     render();
     openResumeDialog();
+    return;
+  }
+  if (session.goal) {
+    await activateExistingGoal(session);
     return;
   }
   openGoalDialog(session);
@@ -704,6 +752,89 @@ function setFormError(message: string | null): void {
   ui.formError.textContent = message ?? '';
 }
 
+function attachmentSize(size: number): string {
+  if (size < 1024) return `${numberFormatter.format(size)} B`;
+  if (size < 1024 * 1024) return `${numberFormatter.format(Math.round(size / 1024))} KB`;
+  return `${numberFormatter.format(Math.round(size / (1024 * 1024) * 10) / 10)} MB`;
+}
+
+function renderAttachments(): void {
+  const fragment = document.createDocumentFragment();
+  for (const attachment of attachments) {
+    const item = document.createElement('li');
+    item.className = 'attachment-item';
+    const copy = document.createElement('div');
+    copy.className = 'attachment-copy';
+    const name = document.createElement('strong');
+    name.className = 'attachment-name';
+    name.textContent = `${attachment.name} · ${attachmentSize(attachment.size)}`;
+    const path = document.createElement('span');
+    path.className = 'attachment-path';
+    path.textContent = attachment.path;
+    path.title = attachment.path;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'attachment-remove';
+    remove.textContent = '×';
+    remove.setAttribute('aria-label', `Quitar ${attachment.name}`);
+    remove.addEventListener('click', () => {
+      attachments = attachments.filter((candidate) => candidate.path !== attachment.path);
+      renderAttachments();
+      announce(`${attachment.name} eliminado de los adjuntos.`);
+    });
+    copy.append(name, path);
+    item.append(copy, remove);
+    fragment.append(item);
+  }
+  ui.attachmentList.replaceChildren(fragment);
+  ui.attachmentEmpty.hidden = attachments.length > 0;
+}
+
+function mergeAttachments(next: LocalAttachment[]): void {
+  const byPath = new Map(attachments.map((attachment) => [attachment.path, attachment]));
+  for (const attachment of next) byPath.set(attachment.path, attachment);
+  if (byPath.size > MAX_ATTACHMENTS) {
+    setFormError(`Se admiten hasta ${MAX_ATTACHMENTS} archivos adjuntos por objetivo.`);
+    return;
+  }
+  attachments = [...byPath.values()];
+  renderAttachments();
+}
+
+async function chooseAttachments(): Promise<void> {
+  ui.attachmentPickerButton.disabled = true;
+  try {
+    const selected = await api.chooseAttachments();
+    mergeAttachments(selected);
+    if (selected.length > 0) announce(`${selected.length} archivos adjuntos añadidos.`);
+  } catch (error) {
+    setFormError(errorText(error));
+  } finally {
+    ui.attachmentPickerButton.disabled = false;
+  }
+}
+
+async function addDroppedFiles(files: FileList): Promise<void> {
+  const paths = [...files].flatMap((file) => {
+    try {
+      const candidate = api.pathForFile(file);
+      return candidate ? [candidate] : [];
+    } catch {
+      return [];
+    }
+  });
+  if (paths.length === 0) {
+    setFormError('No se pudo obtener una ruta local valida de los archivos arrastrados.');
+    return;
+  }
+  try {
+    mergeAttachments(await api.inspectAttachments(paths));
+    announce(`${paths.length} archivos arrastrados añadidos.`);
+  } catch (error) {
+    setFormError(errorText(error));
+  }
+}
+
 function openGoalDialog(session: DesktopSessionInfo | null = null): void {
   attachSession = session;
   const workspace = session?.thread.cwd ?? selectedRun()?.workspace ?? ui.workspaceInput.value;
@@ -715,11 +846,13 @@ function openGoalDialog(session: DesktopSessionInfo | null = null): void {
   ui.threadInput.value = session?.thread.id ?? '';
   ui.workspaceInput.readOnly = session !== null;
   ui.workspacePickerButton.disabled = session !== null;
-  ui.objectiveInput.value = session?.goal?.objective ?? session?.thread.preview ?? '';
+  ui.objectiveInput.value = session?.goal?.objective ?? '';
   ui.objectiveInput.readOnly = session?.goal !== null && session?.goal !== undefined;
+  attachments = [];
+  renderAttachments();
   ui.nameInput.value = session?.thread.name ?? '';
   if (session?.goal?.tokenBudget) ui.tokenBudgetInput.value = String(session.goal.tokenBudget);
-  ui.dialogTitle.textContent = session ? 'Activar modo continuo' : 'Nuevo objetivo';
+  ui.dialogTitle.textContent = session?.goal === null ? 'Coloca el objetivo para activar' : session ? 'Activar modo continuo' : 'Nuevo objetivo';
   ui.dialogDescription.textContent = session
     ? 'La sesión se adjunta de forma segura. Si su turno está activo, esperará a que termine antes de activar el Goal.'
     : 'Define el resultado, los límites y el workspace que Codex puede modificar.';
@@ -727,7 +860,7 @@ function openGoalDialog(session: DesktopSessionInfo | null = null): void {
     ? 'No se enviarán mensajes mientras el turno actual siga activo.'
     : 'La ejecución se guarda localmente y aparece en Codex Desktop.';
   ui.submitButton.textContent = session ? 'Activar modo' : 'Iniciar objetivo';
-  ui.objectiveCount.textContent = `${ui.objectiveInput.value.length} / 4000`;
+  ui.objectiveCount.textContent = `${numberFormatter.format(ui.objectiveInput.value.length)} caracteres`;
   ui.advancedSettings.open = false;
   updateDangerConfirmation();
   setFormError(null);
@@ -743,6 +876,8 @@ function closeGoalDialog(): void {
   ui.workspaceInput.readOnly = false;
   ui.workspacePickerButton.disabled = false;
   ui.objectiveInput.readOnly = false;
+  attachments = [];
+  renderAttachments();
 }
 
 function updateDangerConfirmation(): void {
@@ -776,6 +911,7 @@ function startInput(): StartRunInput {
   const tokenBudget = ui.tokenBudgetInput.value === '' ? null : ui.tokenBudgetInput.valueAsNumber;
   return {
     objective: ui.objectiveInput.value.trim(),
+    attachments: attachments.map((attachment) => attachment.path),
     workspace: ui.workspaceInput.value.trim(),
     name: ui.nameInput.value.trim() || null,
     maxTurns: ui.maxTurnsInput.valueAsNumber,
@@ -1035,12 +1171,39 @@ function wireEvents(): () => void {
   ui.dialogCloseButton.addEventListener('click', closeGoalDialog);
   ui.dialogCancelButton.addEventListener('click', closeGoalDialog);
   ui.form.addEventListener('submit', (event) => { void submitGoal(event); });
+  ui.goalDialog.addEventListener('close', () => {
+    attachSession = null;
+    attachments = [];
+    renderAttachments();
+    ui.attachmentDropzone.classList.remove('is-dragging');
+    attachmentDragDepth = 0;
+  });
   ui.resumeCloseButton.addEventListener('click', closeResumeDialog);
   ui.resumeCancelButton.addEventListener('click', closeResumeDialog);
   ui.resumeForm.addEventListener('submit', (event) => { void resumeSelectedRun(event); });
   ui.resumeFullAccess.addEventListener('change', updateResumeDangerConfirmation);
   ui.objectiveInput.addEventListener('input', () => {
-    ui.objectiveCount.textContent = `${ui.objectiveInput.value.length} / 4000`;
+    ui.objectiveCount.textContent = `${numberFormatter.format(ui.objectiveInput.value.length)} caracteres`;
+  });
+  ui.attachmentPickerButton.addEventListener('click', () => { void chooseAttachments(); });
+  ui.attachmentDropzone.addEventListener('dragenter', (event) => {
+    event.preventDefault();
+    attachmentDragDepth += 1;
+    ui.attachmentDropzone.classList.add('is-dragging');
+  });
+  ui.attachmentDropzone.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+  });
+  ui.attachmentDropzone.addEventListener('dragleave', () => {
+    attachmentDragDepth = Math.max(0, attachmentDragDepth - 1);
+    if (attachmentDragDepth === 0) ui.attachmentDropzone.classList.remove('is-dragging');
+  });
+  ui.attachmentDropzone.addEventListener('drop', (event) => {
+    event.preventDefault();
+    attachmentDragDepth = 0;
+    ui.attachmentDropzone.classList.remove('is-dragging');
+    if (event.dataTransfer?.files.length) void addDroppedFiles(event.dataTransfer.files);
   });
   ui.dangerFullAccess.addEventListener('change', updateDangerConfirmation);
   ui.workspacePickerButton.addEventListener('click', () => { void chooseWorkspace(); });

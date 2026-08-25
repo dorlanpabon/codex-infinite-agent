@@ -14,7 +14,7 @@ test('Desktop platform matrix fails closed', () => {
   assert.equal(isSupportedDesktopPlatform('win32', 'x64'), true);
   assert.equal(isSupportedDesktopPlatform('win32', 'arm64'), false);
   assert.equal(isSupportedDesktopPlatform('darwin', 'arm64'), true);
-  assert.equal(isSupportedDesktopPlatform('darwin', 'x64'), false);
+  assert.equal(isSupportedDesktopPlatform('darwin', 'x64'), true);
   assert.equal(isSupportedDesktopPlatform('linux', 'x64'), true);
   assert.equal(isSupportedDesktopPlatform('linux', 'arm64'), true);
   assert.equal(isSupportedDesktopPlatform('freebsd', 'x64'), false);

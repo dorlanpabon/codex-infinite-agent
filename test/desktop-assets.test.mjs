@@ -18,11 +18,14 @@ test('desktop renderer modules and preload are included in the local protocol bu
   const imports = [...renderer.matchAll(/\bfrom\s+['"](\.[^'"]+)['"]/gu)].map((match) => match[1]);
   assert.ok(imports.length > 0);
   for (const specifier of imports) {
-    const pathname = new URL(specifier, 'codex-infinite://app/app.js').pathname;
+    const pathname = new URL(specifier, 'codex-infinite-app://app/app.js').pathname;
     assert.match(main, new RegExp(`\\[['"]${pathname.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}['"]`));
   }
   assert.match(html, /frame-src 'none'; worker-src 'none'/u);
   assert.match(html, /id="resume-dialog"/u);
+  assert.match(html, /id="context-dialog"/u);
+  assert.match(html, /id="copy-run-link-button"/u);
+  assert.match(html, /id="run-context-button"/u);
   assert.match(html, /id="sessions-tab"/u);
   assert.match(html, /id="sessions-panel"/u);
   assert.match(html, /id="goal-thread"/u);
@@ -45,6 +48,17 @@ test('desktop renderer modules and preload are included in the local protocol bu
   assert.match(renderer, /sessionsPanel\.setAttribute\('aria-busy', 'true'\)/u);
   assert.match(renderer, /api\.listSessions/u);
   assert.match(renderer, /api\.listModels/u);
+  assert.match(renderer, /api\.recentMessages/u);
+  assert.match(renderer, /reconcileSelectedSession\(/u);
+  assert.doesNotMatch(renderer, /retainedSelection/u);
+  assert.match(renderer, /binary:\s*currentBinary\(\)/u);
+  assert.doesNotMatch(renderer, /doctorResult\?\.binary\.path/u);
+  assert.match(renderer, /api\.copyDeepLink/u);
+  assert.match(renderer, /contextTarget = null/u);
+  assert.match(renderer, /contextMessageList\.replaceChildren\(\)/u);
+  assert.match(renderer, /run\.status === 'completed' \|\| run\.status === 'budgetLimited'/u);
+  assert.match(renderer, /run\.status === 'failed'\)\s*return 'Reintentar'/u);
+  assert.match(renderer, /run\.status === 'blocked'\)\s*return 'Revisar y reanudar'/u);
   assert.match(renderer, /model\.isDefault/u);
   assert.match(renderer, /preferredNewModel/u);
   assert.match(renderer, /refreshModelsForConnectionChange/u);
@@ -79,6 +93,41 @@ test('desktop renderer modules and preload are included in the local protocol bu
   assert.doesNotMatch(preload, /openExternal/u);
 });
 
+test('desktop deep links cover cold, warm, and macOS launches without automatic actions', async () => {
+  const [main, renderer, preload] = await Promise.all([
+    readFile(path.join(root, 'dist', 'desktop', 'main.js'), 'utf8'),
+    readFile(path.join(root, 'dist', 'desktop', 'renderer', 'app.js'), 'utf8'),
+    readFile(path.join(root, 'dist', 'desktop', 'preload.cjs'), 'utf8'),
+  ]);
+
+  assert.match(main, /const startupArguments = squirrelStartup \? \[\] : \[\.\.\.process\.argv\]/u);
+  assert.match(main, /app\.on\('open-url',[\s\S]*?receiveDeepLinks\(\[url\]\)/u);
+  assert.match(main, /app\.on\('second-instance',[\s\S]*?receiveDeepLinks\(commandLine\)/u);
+  assert.match(main, /receiveDeepLinks\(startupArguments\)/u);
+  assert.match(main, /app\.setAsDefaultProtocolClient\('codex-infinite'/u);
+  assert.match(main, /process\.argv\[1\]/u);
+  assert.match(main, /--squirrel-install/u);
+  assert.match(main, /--squirrel-updated/u);
+  assert.match(main, /--squirrel-uninstall/u);
+  assert.match(main, /app\.removeAsDefaultProtocolClient\('codex-infinite'\)/u);
+  assert.match(main, /navigationQueue\.markRendererReady\(\)/u);
+  assert.match(main, /if \(!desktopReady\)\s*return/u);
+  assert.doesNotMatch(main, /setImmediate\(flushNavigationQueue\)/u);
+  assert.match(preload, /navigationReady:\s*\(\)\s*=>\s*ipcRenderer\.invoke\(CHANNELS\.navigationReady\)/u);
+  assert.match(renderer, /const initialTargets = await api\.navigationReady\(\)/u);
+  assert.match(renderer, /for \(const target of initialTargets\)\s*await scheduleNavigation\(target\)/u);
+  assert.match(renderer, /case 'navigation-requested':[\s\S]*?scheduleNavigation\(event\.target\)/u);
+
+  const start = renderer.indexOf('async function handleNavigationTarget');
+  const end = renderer.indexOf('function scheduleNavigation', start);
+  assert.ok(start >= 0 && end > start);
+  const navigationHandler = renderer.slice(start, end);
+  assert.match(navigationHandler, /api\.getRun\(target\.id\)/u);
+  assert.match(navigationHandler, /api\.getSession\(/u);
+  assert.doesNotMatch(navigationHandler, /api\.(?:attachRun|startRun|resumeRun|pauseRun)\(/u);
+  assert.doesNotMatch(navigationHandler, /toggleSession\(|activateExistingGoal\(/u);
+});
+
 test('desktop package uses a strict application allowlist', () => {
   const { makers, packagerConfig } = require('../forge.config.cjs');
   const isIgnored = (candidate) => packagerConfig.ignore.some((pattern) => pattern.test(candidate));
@@ -86,6 +135,10 @@ test('desktop package uses a strict application allowlist', () => {
   assert.match(packagerConfig.name, /^[A-Za-z0-9._-]+$/u);
   assert.equal(packagerConfig.name, packagerConfig.executableName);
   assert.equal(packagerConfig.win32metadata.ProductName, 'Codex Infinite');
+  assert.deepEqual(packagerConfig.protocols, [{
+    name: 'Codex Infinite run',
+    schemes: ['codex-infinite'],
+  }]);
   assert.equal(isIgnored('/dist/desktop/main.js'), false);
   assert.equal(isIgnored('/node_modules/electron-squirrel-startup/index.js'), false);
   assert.equal(isIgnored('/node_modules/debug/src/index.js'), false);
@@ -99,9 +152,16 @@ test('desktop package uses a strict application allowlist', () => {
     process.platform !== 'win32',
   );
   const linuxMakers = makers.filter((maker) => maker.platforms?.includes('linux'));
+  const debMaker = makers.find((maker) => maker.name === '@electron-forge/maker-deb');
+  const rpmMaker = makers.find((maker) => maker.name === '@electron-forge/maker-rpm');
   const windowsMaker = makers.find((maker) => maker.platforms?.includes('win32'));
   assert.ok(windowsMaker);
+  assert.ok(debMaker);
+  assert.ok(rpmMaker);
   assert.equal(windowsMaker.config.title, 'Codex Infinite');
   assert.equal(linuxMakers.length, 2);
   assert.equal(linuxMakers.every((maker) => maker.config.options.bin === packagerConfig.executableName), true);
+  assert.deepEqual(debMaker.config.options.mimeType, ['x-scheme-handler/codex-infinite']);
+  assert.deepEqual(rpmMaker.config.options.mimeType, ['x-scheme-handler/codex-infinite']);
+  assert.deepEqual(rpmMaker.config.options.execArguments, ['%U']);
 });

@@ -13,11 +13,11 @@ La [página de releases](https://github.com/dorlanpabon/codex-infinite-agent/rel
 | Sistema | Arquitectura | Artefacto |
 |---|---|---|
 | Windows | x64 | `Codex-Infinite-<version>-windows-x64-Setup.exe` |
-| macOS | Apple Silicon (arm64) | `Codex-Infinite-<version>-macos-arm64.zip` |
+| macOS | Apple Silicon (arm64) e Intel (x64) | `Codex-Infinite-<version>-macos-<arch>.zip` |
 | Debian/Ubuntu | x64 y arm64 | `Codex-Infinite-<version>-linux-<arch>.deb` |
 | Fedora/RHEL | x64 y arm64 | `Codex-Infinite-<version>-linux-<arch>.rpm` |
 
-La versión estable `0.6.0` se distribuye sin certificado comercial de Windows ni firma o notarización de Apple. SmartScreen o Gatekeeper pueden mostrar una advertencia. Comprueba siempre el archivo `SHA256SUMS.txt` de la release antes de instalar y no aceptes un binario obtenido fuera de GitHub Releases.
+La versión estable `0.7.0` se distribuye sin certificado comercial de Windows ni firma o notarización de Apple. SmartScreen o Gatekeeper pueden mostrar una advertencia. Comprueba siempre el archivo `SHA256SUMS.txt` de la release antes de instalar y no aceptes un binario obtenido fuera de GitHub Releases.
 
 Cada artefacto y `SHA256SUMS.txt` incluye procedencia firmada por GitHub/Sigstore. Puedes verificarla con `gh attestation verify <archivo> -R dorlanpabon/codex-infinite-agent`; esto acredita el workflow y commit de origen, pero no reemplaza Authenticode ni la notarización de Apple.
 
@@ -25,7 +25,7 @@ El companion requiere que Codex Desktop esté instalado y que la sesión de Chat
 
 ## Inicio rápido
 
-Requisitos: Codex Desktop con sesión ChatGPT iniciada, Git del sistema y Node.js 22 LTS. Plataformas admitidas: Windows x64, macOS Apple Silicon y Linux x64/arm64 con el paquete oficial de Codex Desktop.
+Requisitos: Codex Desktop con sesión ChatGPT iniciada, Git del sistema y Node.js 22 LTS. Plataformas admitidas: Windows x64, macOS 14+ arm64/x64 y Linux x64/arm64 con el paquete oficial de Codex Desktop.
 
 ```sh
 npm install
@@ -33,6 +33,8 @@ npm start
 ```
 
 La aplicación comprueba Desktop y la sesión, permite elegir el workspace, crear o reanudar Goals, adjuntar archivos, pausarlos, revisar su progreso durable y consultar los threads compartidos. El editor no recorta el objetivo. Al reanudar, red, acceso total y comandos de verificación vuelven a valores seguros y deben autorizarse otra vez en el diálogo.
+
+Cada corrida y sesión puede copiarse como `codex-infinite://run/<uuid>` o `codex-infinite://session/<thread-id>`. Abrir uno de estos enlaces en Windows, macOS o Linux solo enfoca la aplicación y selecciona la referencia; nunca inicia, reanuda ni pausa trabajo automáticamente. Las corridas pausadas, fallidas o bloqueadas se pueden reanudar explícitamente. **Ver contexto** consulta bajo demanda un resumen acotado de los mensajes recientes de usuario/asistente; ese contenido permanece solo en memoria mientras el diálogo está abierto y no se reinserta en el Goal.
 
 El diálogo consulta `model/list` directamente al App Server autenticado, muestra solo los modelos disponibles para la cuenta y selecciona explícitamente el único `isDefault` nativo junto con su esfuerzo predeterminado. Al cambiar de modelo, el selector de esfuerzo se limita a sus valores admitidos. Si un App Server antiguo no ofrece el catálogo, el aviso no bloquea el objetivo: el campo vacío conserva la resolución nativa y cualquier ID escrito manualmente permanece intacto.
 
@@ -134,7 +136,7 @@ Si no puede confirmarse el cierre de un proceso o del estado remoto, el lock que
 ## Compatibilidad
 
 - Windows x64: bundle firmado de Codex Desktop y aislamiento fuerte de descendientes mediante Windows Job. Exige Windows en `C:` y Git for Windows machine-wide bajo `C:\Program Files`.
-- macOS Apple Silicon: bundle firmado en `/Applications/ChatGPT.app`; cierre normal mediante grupo de procesos.
+- macOS 14+ arm64/x64: bundle firmado en `/Applications/ChatGPT.app`; cierre normal mediante grupo de procesos.
 - Linux x64/arm64: paquete oficial instalado en `/usr/lib/chatgpt`; cierre normal mediante grupo de procesos.
 
 Las operaciones Goal requieren `experimentalApi` del App Server y pueden cambiar entre versiones de Desktop. `doctor` valida transporte y autenticación, no la ejecución completa de `thread/goal/*`. La CI multiplataforma usa mocks y empaqueta la interfaz, pero no sustituye un smoke autenticado de Desktop. El 25 de agosto de 2026 pasó un smoke real autenticado de extremo a extremo: el Goal nativo llegó a `update_goal complete`, creó el commit solicitado con el árbol Git limpio y superó los comandos `--verify`. El paquete permanece privado para npm y se distribuye únicamente mediante instaladores de GitHub Releases.
@@ -154,6 +156,6 @@ npm run desktop:make
 
 `desktop:package` crea la aplicación desempaquetada. `desktop:make` genera Squirrel en Windows, ZIP en macOS y paquetes DEB/RPM en Linux dentro de `out/`; no realiza compilación cruzada.
 
-La suite cubre activación Goal sin `turn/start`, eventos de `update_goal`, orden terminal/turno, políticas del thread, rechazos, estado atómico, locks, verificación, reparación, bloqueo y reconciliación tras crash. La CI genera los instaladores y arranca la aplicación empaquetada en Windows x64, macOS ARM64 y Linux x64/arm64. Consulta [SECURITY.md](SECURITY.md) antes de ampliar permisos.
+La suite cubre activación Goal sin `turn/start`, eventos de `update_goal`, orden terminal/turno, políticas del thread, rechazos, estado atómico, locks, verificación, reparación, bloqueo y reconciliación tras crash. La CI genera los instaladores y arranca la aplicación empaquetada en Windows x64, macOS arm64/x64 y Linux x64/arm64. Consulta [SECURITY.md](SECURITY.md) antes de ampliar permisos.
 
 Protocolo: [Codex App Server](https://learn.chatgpt.com/docs/app-server). Goals durables: [Long-running work](https://learn.chatgpt.com/docs/long-running-work).

@@ -42,7 +42,7 @@ try {
   const window = await findAppWindow(browser);
   await window.waitForLoadState('domcontentloaded');
   assert.equal(await window.title(), 'Codex Infinite');
-  assert.equal(await window.url(), 'codex-infinite://app/index.html');
+  assert.equal(await window.url(), 'codex-infinite-app://app/index.html');
   const inspectorLinkState = await window.evaluate(() => ({
     buttonHidden: document.querySelector('#inspect-open-codex-button')?.hidden,
     runHidden: document.querySelector('#run-detail')?.hidden,
@@ -267,7 +267,7 @@ async function findAppWindow(browser) {
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     const window = browser.contexts().flatMap((context) => context.pages())
-      .find((page) => page.url() === 'codex-infinite://app/index.html');
+      .find((page) => page.url() === 'codex-infinite-app://app/index.html');
     if (window) return window;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }

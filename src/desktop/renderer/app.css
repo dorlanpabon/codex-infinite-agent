@@ -564,6 +564,7 @@ button:disabled {
 .run-actions {
   display: flex;
   flex: 0 0 auto;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -919,10 +920,33 @@ progress::-webkit-progress-value { background: var(--accent); }
   border-top: 0;
 }
 
+.session-item.is-selected {
+  border-radius: 8px;
+  background: rgb(226 167 63 / 8%);
+  box-shadow: inset 2px 0 var(--accent);
+}
+
+.session-item:focus {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
 .session-actions {
   display: flex;
   align-items: flex-start;
   gap: 6px;
+}
+
+.session-inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  margin-top: 7px;
+}
+
+.session-inline-button {
+  min-height: 44px;
+  white-space: nowrap;
 }
 
 .session-open-button {
@@ -1113,6 +1137,73 @@ progress::-webkit-progress-value { background: var(--accent); }
   display: flex;
   max-height: min(860px, calc(100svh - 36px));
   flex-direction: column;
+}
+
+.context-shell {
+  display: flex;
+  width: min(760px, calc(100vw - 36px));
+  max-height: min(860px, calc(100svh - 36px));
+  flex-direction: column;
+}
+
+.context-body {
+  min-height: 320px;
+}
+
+.context-source {
+  margin: 0 0 14px;
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+}
+
+.context-message-list {
+  display: grid;
+  padding: 0;
+  margin: 0;
+  gap: 12px;
+  list-style: none;
+}
+
+.context-message {
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.context-message[data-role="assistant"] {
+  border-left: 2px solid var(--accent);
+}
+
+.context-message header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.context-message header strong {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.context-message header code {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-message p {
+  margin: 9px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
 }
 
 .dialog-header,
@@ -1688,6 +1779,11 @@ textarea::placeholder {
   }
 
   .goal-dialog form {
+    max-height: calc(100svh - 16px);
+  }
+
+  .context-shell {
+    width: calc(100vw - 16px);
     max-height: calc(100svh - 16px);
   }
 

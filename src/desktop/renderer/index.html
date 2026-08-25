@@ -74,9 +74,15 @@
               <p id="run-objective">—</p>
             </div>
             <div class="run-actions" aria-label="Acciones de ejecución">
+              <button class="secondary-button" id="run-context-button" type="button">
+                Contexto
+              </button>
+              <button class="secondary-button" id="copy-run-link-button" type="button">
+                Copiar enlace
+              </button>
               <button class="secondary-button" id="resume-button" type="button">
                 <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m7 5 8 5-8 5z"/></svg>
-                Reanudar
+                <span id="resume-button-label">Reanudar</span>
               </button>
               <button class="secondary-button" id="pause-button" type="button">
                 <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M7 5v10M13 5v10"/></svg>
@@ -395,6 +401,33 @@
           </div>
         </footer>
       </form>
+    </dialog>
+
+    <dialog class="goal-dialog context-dialog" id="context-dialog" aria-labelledby="context-dialog-title" aria-describedby="context-dialog-description">
+      <section class="context-shell">
+        <header class="dialog-header">
+          <div>
+            <span class="eyebrow">Solo lectura · no se guarda</span>
+            <h2 id="context-dialog-title">Contexto reciente</h2>
+            <p id="context-dialog-description">Hasta 20 mensajes recientes y 24.000 caracteres, consultados directamente desde Codex Desktop.</p>
+          </div>
+          <button class="icon-button" id="context-close-button" type="button" aria-label="Cerrar">
+            <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15"/></svg>
+          </button>
+        </header>
+        <div class="dialog-body context-body">
+          <p class="context-source" id="context-source">—</p>
+          <p class="section-empty" id="context-empty">Selecciona una sesión para consultar su contexto.</p>
+          <ol class="context-message-list" id="context-message-list" aria-live="polite"></ol>
+        </div>
+        <footer class="dialog-footer">
+          <span id="context-status">El contenido se elimina de esta vista al cerrar.</span>
+          <div>
+            <button class="secondary-button" id="context-refresh-button" type="button">Actualizar</button>
+            <button class="primary-button" id="context-done-button" type="button">Cerrar</button>
+          </div>
+        </footer>
+      </section>
     </dialog>
 
     <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>

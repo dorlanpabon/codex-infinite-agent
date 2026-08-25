@@ -15,6 +15,7 @@ const releaseRoot = path.join(root, 'release-assets');
 const expected = [
   `Codex-Infinite-${packageJson.version}-windows-x64-Setup.exe`,
   `Codex-Infinite-${packageJson.version}-macos-arm64.zip`,
+  `Codex-Infinite-${packageJson.version}-macos-x64.zip`,
   `Codex-Infinite-${packageJson.version}-linux-x64.deb`,
   `Codex-Infinite-${packageJson.version}-linux-x64.rpm`,
   `Codex-Infinite-${packageJson.version}-linux-arm64.deb`,

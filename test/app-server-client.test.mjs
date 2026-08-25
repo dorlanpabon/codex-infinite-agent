@@ -149,6 +149,158 @@ test('listModels rejects malformed native catalog pages', async (t) => {
   await assert.rejects(() => client.listModels(), /esfuerzo|reasoningEffort|invalido/i);
 });
 
+test('recent context requests bounded summaries and returns messages in chronological order', async (t) => {
+  const { rpc, client } = await openOwnedClient(t);
+  rpc.when('thread/turns/list', () => ({
+    data: [
+      {
+        id: 'turn-new',
+        items: [
+          { type: 'userMessage', content: [{ type: 'text', text: ' new question ' }] },
+          { type: 'commandExecution', command: 'ignored' },
+          { type: 'agentMessage', text: ' new answer ' },
+        ],
+      },
+      {
+        id: 'turn-old',
+        items: [
+          {
+            type: 'userMessage',
+            content: [
+              { type: 'text', text: 'old question' },
+              { type: 'image', url: 'ignored' },
+              { type: 'text', text: 'more context' },
+            ],
+          },
+          { type: 'agentMessage', text: 'old answer' },
+        ],
+      },
+    ],
+    nextCursor: null,
+  }));
+
+  const messages = await client.listRecentMessages('thread-owned', 2, 4321);
+
+  assert.deepEqual(messages, [
+    { turnId: 'turn-old', role: 'user', text: 'old question\nmore context' },
+    { turnId: 'turn-old', role: 'assistant', text: 'old answer' },
+    { turnId: 'turn-new', role: 'user', text: 'new question' },
+    { turnId: 'turn-new', role: 'assistant', text: 'new answer' },
+  ]);
+  assert.deepEqual(rpc.calls.at(-1), {
+    method: 'thread/turns/list',
+    params: {
+      threadId: 'thread-owned',
+      cursor: null,
+      limit: 2,
+      sortDirection: 'desc',
+      itemsView: 'summary',
+    },
+    timeoutMs: 4321,
+  });
+});
+
+test('recent context keeps only the newest bounded messages and characters', async (t) => {
+  const { rpc, client } = await openOwnedClient(t);
+  const newestFirst = Array.from({ length: 10 }, (_, index) => 10 - index);
+  rpc.when('thread/turns/list', () => ({
+    data: newestFirst.map((number) => ({
+      id: `turn-${number}`,
+      items: [
+        { type: 'userMessage', content: [{ type: 'text', text: `question-${number}` }] },
+        { type: 'agentMessage', text: `answer-${number}` },
+      ],
+    })),
+    nextCursor: null,
+  }));
+
+  const messageBounded = await client.listRecentMessages('thread-owned', 10);
+  assert.equal(messageBounded.length, 20);
+  assert.equal(messageBounded[0].turnId, 'turn-1');
+  assert.equal(messageBounded.at(-1).turnId, 'turn-10');
+
+  rpc.when('thread/turns/list', () => ({
+    data: newestFirst.map((number) => ({
+      id: `turn-${number}`,
+      items: [{ type: 'agentMessage', text: String(number).repeat(9000) }],
+    })),
+    nextCursor: null,
+  }));
+
+  const characterBounded = await client.listRecentMessages('thread-owned', 10);
+  assert.deepEqual(characterBounded.map(({ turnId }) => turnId), [
+    'turn-5', 'turn-6', 'turn-7', 'turn-8', 'turn-9', 'turn-10',
+  ]);
+  assert.equal(characterBounded.every(({ text }) => text.length === 4000), true);
+  assert.equal(characterBounded.reduce((total, { text }) => total + text.length, 0), 24_000);
+});
+
+test('recent context rejects unsafe turn and timeout limits before transport', async (t) => {
+  const { rpc, client } = await openOwnedClient(t);
+  const callsBefore = rpc.calls.length;
+
+  await assert.rejects(() => client.listRecentMessages('thread-owned', 0), /limite/i);
+  await assert.rejects(() => client.listRecentMessages('thread-owned', 11), /limite/i);
+  await assert.rejects(() => client.listRecentMessages('thread-owned', 1.5), /limite/i);
+  await assert.rejects(() => client.listRecentMessages('thread-owned', 1, 0), /positivo/i);
+  assert.equal(rpc.calls.length, callsBefore);
+});
+
+test('recent turn history pages newest-first across 11 pages and returns chronological order', async (t) => {
+  const { rpc, client } = await openOwnedClient(t);
+  const newestFirst = Array.from({ length: 1_001 }, (_, index) => ({
+    id: `turn-${1_001 - index}`,
+    status: 'completed',
+    error: null,
+    items: [],
+  }));
+  rpc.when('thread/turns/list', ({ params }) => {
+    const page = params.cursor === null ? 0 : Number(params.cursor.slice(5));
+    const start = page * 100;
+    const data = newestFirst.slice(start, start + params.limit);
+    return {
+      data,
+      nextCursor: start + data.length < newestFirst.length ? `page-${page + 1}` : null,
+    };
+  });
+
+  const turns = await client.listRecentTurns('thread-owned', 1_001);
+
+  assert.equal(turns.length, 1_001);
+  assert.equal(turns[0].turnId, 'turn-1');
+  assert.equal(turns.at(-1).turnId, 'turn-1001');
+  assert.equal(rpc.calls.filter(({ method }) => method === 'thread/turns/list').length, 11);
+  assert.equal((await client.readTurn('thread-owned', 'turn-1001')).turnId, 'turn-1001');
+});
+
+test('recent turn history rejects a repeated pagination cursor', async (t) => {
+  const { rpc, client } = await openOwnedClient(t);
+  let calls = 0;
+  rpc.when('thread/turns/list', () => {
+    calls += 1;
+    return {
+      data: [{ id: `turn-${calls}`, status: 'completed', error: null, items: [] }],
+      nextCursor: 'same',
+    };
+  });
+
+  await assert.rejects(() => client.listRecentTurns('thread-owned', 10), /cursor.*repetido/iu);
+  assert.equal(calls, 2);
+});
+
+test('recent context rejects server pages that exceed requested turn or item bounds', async (t) => {
+  const { rpc, client } = await openOwnedClient(t);
+  rpc.when('thread/turns/list', () => ({
+    data: [{ id: 'turn-1', items: [] }, { id: 'turn-2', items: [] }],
+  }));
+  await assert.rejects(() => client.listRecentMessages('thread-owned', 1), /limite solicitado/i);
+
+  rpc.when('thread/turns/list', () => ({
+    data: [{ id: 'turn-1', items: Array.from({ length: 1_001 }, () => ({ type: 'commandExecution' })) }],
+  }));
+  await assert.rejects(() => client.listRecentMessages('thread-owned', 1), /demasiados items/i);
+});
+
 test('configureThread applies network, sandbox, model, and effort to native Goal turns', async (t) => {
   const { rpc, client } = await openOwnedClient(t);
   rpc.when('thread/settings/update', () => ({}));
@@ -527,6 +679,85 @@ test('abort interrupts a still-active turn after the Goal already became complet
   assert.equal(rpc.calls.some(({ method }) => method === 'turn/interrupt'), true);
 });
 
+test('terminal Goal rejects a newly started manual turn without interrupting it', async (t) => {
+  const { rpc, client } = await openOwnedClient(t);
+  const started = [];
+  rpc.when('thread/goal/set', () => {
+    rpc.emit('notification', {
+      method: 'turn/started',
+      params: { threadId: 'thread-owned', turn: { id: 'turn-owned', status: 'inProgress' } },
+    });
+    return { goal: goal('active') };
+  });
+
+  const promise = client.runNativeGoal({
+    threadId: 'thread-owned',
+    objective: 'Finish safely',
+    timeoutMs: 5000,
+    turnTimeoutMs: 5000,
+    maxTurns: 2,
+    signal: new AbortController().signal,
+    onTurnStarted: (turnId) => { started.push(turnId); },
+  });
+  await new Promise(setImmediate);
+  rpc.emit('notification', {
+    method: 'thread/goal/updated',
+    params: { threadId: 'thread-owned', turnId: 'turn-owned', goal: goal('complete', 10) },
+  });
+  rpc.emit('notification', {
+    method: 'turn/started',
+    params: { threadId: 'thread-owned', turn: { id: 'turn-manual', status: 'inProgress' } },
+  });
+
+  await assert.rejects(promise, (error) => error?.code === 'UNOWNED_THREAD_ACTIVITY');
+  assert.deepEqual(started, ['turn-owned']);
+  assert.equal(rpc.calls.some(({ method, params }) => method === 'turn/interrupt' && params.turnId === 'turn-manual'), false);
+  client.releaseThreadOwnership('thread-owned');
+});
+
+test('terminal quiescence interrupts only its immutable owned turn', async (t) => {
+  const { rpc, client } = await openOwnedClient(t);
+  const controller = new AbortController();
+  const interrupted = [];
+  const started = [];
+  let turns = [{ id: 'turn-owned', status: 'inProgress', error: null, items: [] }];
+  rpc.when('thread/goal/set', ({ params }) => {
+    if (params.status === 'active') {
+      rpc.emit('notification', {
+        method: 'turn/started',
+        params: { threadId: 'thread-owned', turn: { id: 'turn-owned', status: 'inProgress' } },
+      });
+    }
+    return { goal: goal(params.status) };
+  });
+  rpc.when('thread/turns/list', () => ({ data: turns, nextCursor: null }));
+  rpc.when('turn/interrupt', ({ params }) => {
+    interrupted.push(params.turnId);
+    turns = [
+      { id: 'turn-owned', status: 'interrupted', error: null, items: [] },
+      { id: 'turn-manual', status: 'inProgress', error: null, items: [] },
+    ];
+    return {};
+  });
+
+  const promise = client.runNativeGoal({
+    threadId: 'thread-owned',
+    objective: 'Finish safely',
+    timeoutMs: 5000,
+    turnTimeoutMs: 5000,
+    maxTurns: 2,
+    signal: controller.signal,
+    onTurnStarted: (turnId) => { started.push(turnId); },
+  });
+  await new Promise(setImmediate);
+  controller.abort();
+
+  await assert.rejects(promise, (error) => error?.code === 'UNOWNED_THREAD_ACTIVITY');
+  assert.deepEqual(interrupted, ['turn-owned']);
+  assert.deepEqual(started, ['turn-owned']);
+  client.releaseThreadOwnership('thread-owned');
+});
+
 test('unknown server requests fail closed for the active owned turn', async (t) => {
   const { rpc, client } = await openOwnedClient(t);
   rpc.when('thread/goal/set', ({ params }) => {
@@ -640,6 +871,65 @@ test('native Goal does not report an activation attempt before preflight passes'
     onActivationAttempt: () => { attempted = true; },
   }), /Interrumpido antes de activar/);
   assert.equal(attempted, false);
+});
+
+test('native Goal rejects a manual turn started during protected preactivation', async (t) => {
+  const { rpc, client } = await openOwnedClient(t);
+  let attempted = false;
+  const started = [];
+
+  await assert.rejects(() => client.runNativeGoal({
+    threadId: 'thread-owned',
+    objective: 'Finish safely',
+    timeoutMs: 5000,
+    turnTimeoutMs: 5000,
+    maxTurns: 2,
+    signal: new AbortController().signal,
+    beforeActivation: async () => {
+      rpc.emit('notification', {
+        method: 'turn/started',
+        params: { threadId: 'thread-owned', turn: { id: 'turn-manual', status: 'inProgress' } },
+      });
+      await Promise.resolve();
+    },
+    onActivationAttempt: () => { attempted = true; },
+    onTurnStarted: (turnId) => { started.push(turnId); },
+  }), (error) => error?.code === 'UNOWNED_THREAD_ACTIVITY');
+
+  assert.equal(attempted, false);
+  assert.deepEqual(started, []);
+  assert.equal(rpc.calls.some(({ method }) => method === 'thread/goal/set'), false);
+  assert.equal(rpc.calls.some(({ method, params }) => method === 'turn/interrupt' && params.turnId === 'turn-manual'), false);
+});
+
+test('manual activity cancels protected preactivation before its next mutation', async (t) => {
+  const { rpc, client } = await openOwnedClient(t);
+  let releasePreactivation;
+  let mutated = false;
+  const promise = client.runNativeGoal({
+    threadId: 'thread-owned',
+    objective: 'Finish safely',
+    timeoutMs: 5000,
+    turnTimeoutMs: 5000,
+    maxTurns: 2,
+    signal: new AbortController().signal,
+    beforeActivation: async (signal) => {
+      await new Promise((resolve) => { releasePreactivation = resolve; });
+      if (!signal.aborted) mutated = true;
+    },
+  });
+  await new Promise(setImmediate);
+
+  rpc.emit('notification', {
+    method: 'turn/started',
+    params: { threadId: 'thread-owned', turn: { id: 'turn-manual', status: 'inProgress' } },
+  });
+  releasePreactivation();
+
+  await assert.rejects(promise, (error) => error?.code === 'UNOWNED_THREAD_ACTIVITY');
+  assert.equal(mutated, false);
+  assert.equal(rpc.calls.some(({ method }) => method === 'thread/goal/set'), false);
+  assert.equal(rpc.calls.some(({ method }) => method === 'turn/interrupt'), false);
 });
 
 test('server approval requests are denied', async (t) => {

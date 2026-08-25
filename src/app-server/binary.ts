@@ -17,7 +17,7 @@ export const FIXED_DESKTOP_BINARIES = Object.freeze({
 
 export function isSupportedDesktopPlatform(platform: NodeJS.Platform, arch: string): boolean {
   return (platform === 'win32' && arch === 'x64')
-    || (platform === 'darwin' && arch === 'arm64')
+    || (platform === 'darwin' && (arch === 'arm64' || arch === 'x64'))
     || (platform === 'linux' && (arch === 'x64' || arch === 'arm64'));
 }
 

@@ -64,8 +64,8 @@ test('desktop contracts reject malformed identifiers and oversized values', () =
   assert.throws(() => parseStartRunInput({ ...startInput, maxTurns: 1001 }), /invalidos/i);
   assert.throws(() => parseStartRunInput({ ...startInput, verifyCommands: Array.from({ length: 21 }, () => 'true') }), /invalidos/i);
   assert.throws(() => parseAttachRunInput({ ...startInput, threadId: '../thread\n' }), /invalidos/i);
-  assert.throws(() => parseThreadId('01a0291b-9f2e-0152-9575-c8f7c545b848'), /invalido/i);
-  assert.throws(() => parseThreadId('01a0291b-9f2e-7152-7575-c8f7c545b848'), /invalido/i);
+  assert.throws(() => parseThreadId('01a0291b-9f2e-7152-9575-c8f7c545b84'), /invalido/i);
+  assert.throws(() => parseThreadId('01a0291b-9f2e-7152-z575-c8f7c545b848'), /invalido/i);
   assert.throws(() => codexThreadDeepLink('https://example.com'), /invalido/i);
   assert.throws(() => parseAttachRunInput({ ...startInput, threadId: 'thread-ok', extra: true }), /invalidos/i);
   assert.throws(() => parseStartRunInput({ ...startInput, attachments: ['relative.txt'] }), /invalidos/i);

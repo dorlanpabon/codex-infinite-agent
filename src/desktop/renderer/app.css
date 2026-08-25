@@ -867,7 +867,15 @@ progress::-webkit-progress-value { background: var(--accent); }
 }
 
 .sessions-panel {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
   padding: 18px;
+}
+
+.sessions-panel[hidden] {
+  display: none;
 }
 
 .sessions-heading {
@@ -890,7 +898,13 @@ progress::-webkit-progress-value { background: var(--accent); }
 }
 
 .session-list {
+  min-height: 0;
+  flex: 1;
   margin-top: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
 }
 
 .session-item {
@@ -1303,6 +1317,11 @@ textarea::placeholder {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
+}
+
+.model-picker-row .secondary-button {
+  min-width: 88px;
+  padding-inline: 10px;
 }
 
 .limits-grid {

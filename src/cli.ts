@@ -21,7 +21,7 @@ if (typeof packageMetadata !== 'object' || packageMetadata === null
   throw new Error('package.json no contiene una versión válida.');
 }
 const VERSION = packageMetadata.version;
-const EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'ultra']);
+const EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 
 interface ParsedArgs {
   command: string;
@@ -49,7 +49,7 @@ Opciones de run:
   --token-budget n            Presupuesto nativo de Goal
   --verify comando            Verificacion host; se puede repetir
   --model id                  Modelo de Codex
-  --effort nivel              minimal|low|medium|high|xhigh|ultra
+  --effort nivel              minimal|low|medium|high|xhigh|max|ultra
   --network                   Habilitar red dentro del sandbox
   --danger-full-access        Desactivar el sandbox del workspace
   --bin ruta                  Binario App Server explicito

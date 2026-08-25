@@ -31,6 +31,7 @@ const startInput = {
 
 test('desktop contracts accept exact inputs without an artificial objective limit', () => {
   assert.deepEqual(parseStartRunInput(startInput), startInput);
+  assert.equal(parseStartRunInput({ ...startInput, effort: 'max' }).effort, 'max');
   assert.equal(parseStartRunInput({ ...startInput, objective: 'x'.repeat(20_000) }).objective.length, 20_000);
   assert.deepEqual(parseAttachmentPaths(['C:\\workspace\\brief.pdf']), ['C:\\workspace\\brief.pdf']);
   assert.deepEqual(parseDoctorInput({ workspace: null, binary: null }), { workspace: null, binary: null });

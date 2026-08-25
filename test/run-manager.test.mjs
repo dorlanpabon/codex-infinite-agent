@@ -28,6 +28,7 @@ function state(status = 'initializing') {
 
 const startInput = {
   objective: 'Complete the goal',
+  attachments: [],
   workspace: process.cwd(),
   name: null,
   maxTurns: 3,
@@ -42,6 +43,25 @@ const startInput = {
   dangerConfirmation: false,
   binary: null,
 };
+
+test('run manager forwards the selected native model and effort unchanged', async () => {
+  let received;
+  const execute = async (options, _signal, _logger, hooks) => {
+    received = options;
+    const value = state('completed');
+    value.model = options.model;
+    value.effort = options.effort;
+    hooks?.onRunChanged?.(value);
+    return value;
+  };
+  const manager = new RunManager(() => undefined, { startGoal: execute, resumeGoal: execute });
+
+  await manager.start({ ...startInput, model: 'gpt-native-default', effort: 'max' });
+  await manager.shutdown();
+
+  assert.equal(received.model, 'gpt-native-default');
+  assert.equal(received.effort, 'max');
+});
 
 function controlledExecutor() {
   return async (_options, signal, _logger, hooks) => {

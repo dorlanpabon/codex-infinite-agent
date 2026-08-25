@@ -287,13 +287,19 @@
               <div class="limits-grid limits-grid--two">
                 <div class="field">
                   <label for="goal-model">Modelo</label>
-                  <input id="goal-model" name="model" type="text" maxlength="256" autocomplete="off" placeholder="Predeterminado de Desktop">
+                  <div class="picker-row model-picker-row">
+                    <input id="goal-model" name="model" type="text" maxlength="256" autocomplete="off" list="goal-model-options" aria-describedby="model-help" placeholder="Cargando predeterminado de Codex…">
+                    <button class="secondary-button" id="models-refresh-button" type="button" aria-label="Actualizar modelos disponibles">Actualizar</button>
+                  </div>
+                  <datalist id="goal-model-options"></datalist>
+                  <span class="field-help" id="model-help" aria-live="polite">Consultando el catálogo nativo de Codex…</span>
                 </div>
                 <div class="field">
                   <label for="goal-effort">Esfuerzo</label>
-                  <select id="goal-effort" name="effort">
+                  <select id="goal-effort" name="effort" aria-describedby="effort-help">
                     <option value="">Predeterminado</option>
                   </select>
+                  <span class="field-help" id="effort-help">Se ajusta a las opciones admitidas por el modelo.</span>
                 </div>
               </div>
 
